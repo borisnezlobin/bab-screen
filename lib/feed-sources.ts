@@ -1,5 +1,6 @@
 // Where the news-and-posts feed comes from, and how often. Edit the lists here; nothing else needs
-// to change. Every URL below was fetched and checked for recent items on 2026-10-01.
+// to change. Every URL below was fetched and checked for recent items on 2026-10-01 (the AI, developer and
+// campus-safety feeds on 2026-10-02).
 
 /** A selection is made this often while a screen is polling /api/feed. One model call each. */
 export const REFRESH_MINUTES = 15;
@@ -18,6 +19,8 @@ export const TARGET_ITEMS = 20;
 export const MAX_ITEMS = 25;
 /** Fewer valid picks than this from the agent and the deterministic ordering is used instead. */
 export const MIN_AGENT_PICKS = 10;
+/** An item the model files under `alerts` is pinned only while it is newer than this. */
+export const ALERT_MAX_AGE_HOURS = 12;
 /** Ids from this many previous selections are marked "shown" so the next one rotates. */
 export const HISTORY_SELECTIONS = 2;
 
@@ -53,12 +56,25 @@ export const NEWS_FEEDS: RssSource[] = [
   { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index" },
   { name: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
   { name: "MIT Technology Review", url: "https://www.technologyreview.com/feed/", everyMinutes: 30 },
+  // AI labs and developer platforms: their own announcements of models, features and research. A few
+  // posts a week each, so a three-day window.
+  { name: "OpenAI", url: "https://openai.com/news/rss.xml", maxAgeHours: 72, everyMinutes: 30 },
+  { name: "Google AI", url: "https://blog.google/technology/ai/rss/", maxAgeHours: 72, everyMinutes: 30 },
+  { name: "Hugging Face", url: "https://huggingface.co/blog/feed.xml", maxAgeHours: 72, everyMinutes: 30 },
+  { name: "Cloudflare", url: "https://blog.cloudflare.com/rss/", maxAgeHours: 72, everyMinutes: 30 },
+  { name: "GitHub", url: "https://github.blog/feed/", maxAgeHours: 72, everyMinutes: 60 },
+  { name: "Simon Willison", url: "https://simonwillison.net/atom/everything/", maxAgeHours: 48, everyMinutes: 30 },
   // Research and protocol blogs: a post a week at most, so a longer window and an hourly fetch
   { name: "Ethereum Foundation", url: "https://blog.ethereum.org/feed.xml", maxAgeHours: 7 * 24, everyMinutes: 60 },
   { name: "Vitalik Buterin", url: "https://vitalik.eth.limo/feed.xml", maxAgeHours: 7 * 24, everyMinutes: 60 },
   { name: "a16z crypto", url: "https://a16zcrypto.com/feed/", maxAgeHours: 7 * 24, everyMinutes: 60 },
-  // Berkeley
-  { name: "Berkeley News", url: "https://news.berkeley.edu/feed/", maxAgeHours: 72, everyMinutes: 60 },
+  // Berkeley. The Daily Californian and The Berkeley Scanner report campus and city safety incidents within
+  // the hour; they are fetched every refresh. Berkeley News is limited to its technology and engineering
+  // section, and EECS to the department's own news: the campus-wide feed is mostly research from other fields.
+  { name: "The Daily Californian", url: "https://www.dailycal.org/search/?f=rss&t=article&l=50&s=start_time&sd=desc" },
+  { name: "The Berkeley Scanner", url: "https://www.berkeleyscanner.com/feed/" },
+  { name: "Berkeley News", url: "https://news.berkeley.edu/category/research/technology-engineering/feed/", maxAgeHours: 7 * 24, everyMinutes: 60 },
+  { name: "Berkeley EECS", url: "https://eecs.berkeley.edu/news/feed/", maxAgeHours: 7 * 24, everyMinutes: 60 },
   // The club's own Substack. Last post April 2024; listed so a new post shows up by itself.
   { name: "Blockchain at Berkeley", url: "https://blockchainatberkeley.substack.com/feed", maxAgeHours: 14 * 24, everyMinutes: 60 },
 ];

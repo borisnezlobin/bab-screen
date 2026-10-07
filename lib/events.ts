@@ -156,11 +156,14 @@ const addDays = (w: Wall, days: number): Wall => wallFromMs(wallMs(midnight(w)) 
 
 // --- Untrusted text --------------------------------------------------------------------------
 
+// eslint-disable-next-line no-control-regex
+const CLEAN_INVISIBLE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
+
 /** Plain single-line text: no control or invisible formatting characters, clamped by code points. */
 function clean(value: unknown, max: number): string {
   if (typeof value !== "string") return "";
   const text = value
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, " ")
+    .replace(CLEAN_INVISIBLE_RE, " ")
     .replace(/\s+/g, " ")
     .trim();
   const points = Array.from(text);
@@ -266,6 +269,123 @@ export type ParseOptions = {
   displayZone?: string;
 };
 
+function buildReplacedMap(components: IcalComponent[], calendarZone: string): Map<string, Set<string>> {
+  const replaced = new Map<string, Set<string>>();
+  for (const component of components) {
+    const original = firstStamp(component, "recurrence-id", calendarZone);
+    if (!original) continue;
+    const uid = clean(component.getFirstPropertyValue("uid"), 400);
+    const keys = replaced.get(uid) ?? new Set<string>();
+    for (const key of stampKeys(original)) keys.add(key);
+    replaced.set(uid, keys);
+  }
+  return replaced;
+}
+
+function buildExcludedSet(component: IcalComponent, calendarZone: string, uid: string, replaced: Map<string, Set<string>>): Set<string> {
+  const gone = new Set<string>(replaced.get(uid));
+  for (const excluded of allStamps(component, "exdate", calendarZone)) {
+    for (const key of stampKeys(excluded)) gone.add(key);
+  }
+  return gone;
+}
+
+function isRulePast(stamp: Stamp, untilStamp: Stamp): boolean {
+  if (stamp.isDate || untilStamp.isDate) return dateNumber(stamp.wall) > dateNumber(untilStamp.wall);
+  const roughly = wallMs(stamp.wall);
+  return roughly - 2 * DAY_MS > wallMs(untilStamp.wall) || zonedToUtc(stamp.wall, stamp.zone) > zonedToUtc(untilStamp.wall, untilStamp.zone);
+}
+
+function untilStampOf(rule: InstanceType<typeof ICAL.Recur>, startZone: string): Stamp | null {
+  const until = isTime(rule.until) ? rule.until : null;
+  if (!until) return null;
+  const zone = until.zone?.tzid === "UTC" ? "UTC" : startZone;
+  return { isDate: until.isDate, wall: wallOf(until), zone };
+}
+
+function stepRule(
+  rule: InstanceType<typeof ICAL.Recur>,
+  start: Stamp,
+  untilStamp: Stamp | null,
+  from: number,
+  to: number,
+  spanMs: number,
+  emit: (stamp: Stamp) => void,
+): boolean {
+  const stepping = rule.clone();
+  stepping.until = null;
+  const iterator = stepping.iterator(ICAL.Time.fromData({ year: start.wall.y, month: start.wall.mo, day: start.wall.d, hour: start.wall.h, minute: start.wall.mi, second: start.wall.s, isDate: start.isDate }));
+  for (let step = 0; step < MAX_RULE_STEPS; step += 1) {
+    const next = iterator.next();
+    if (!next) return true;
+    const stamp: Stamp = { isDate: start.isDate, wall: wallOf(next), zone: start.zone };
+    const roughly = wallMs(stamp.wall);
+    if (untilStamp && isRulePast(stamp, untilStamp)) return true;
+    if (roughly - 2 * DAY_MS >= to) return true;
+    if (roughly + spanMs + 2 * DAY_MS > from) emit(stamp);
+  }
+  return false;
+}
+
+function processRrules(
+  component: IcalComponent,
+  start: Stamp,
+  details: Details,
+  shape: Shape,
+  calendarZone: string,
+  displayZone: string,
+  uid: string,
+  replaced: Map<string, Set<string>>,
+  options: ParseOptions,
+  spanMs: number,
+  keep: (item: Occurrence) => void,
+): number {
+  const rules = component.getAllProperties("rrule").map((p) => p.getFirstValue()).filter((r): r is InstanceType<typeof ICAL.Recur> => r instanceof ICAL.Recur);
+  const extra = allStamps(component, "rdate", calendarZone);
+  if (!rules.length && !extra.length) {
+    keep(occurrence(details, start, shape, displayZone));
+    return 0;
+  }
+  const gone = buildExcludedSet(component, calendarZone, uid, replaced);
+  const emit = (stamp: Stamp) => {
+    if (!instanceKeys(stamp).some((key) => gone.has(key))) keep(occurrence(details, stamp, shape, displayZone));
+  };
+  for (const stamp of extra) if (stamp.isDate === start.isDate) emit(stamp);
+  if (!rules.length) { emit(start); return 0; }
+  let unfinished = 0;
+  for (const rule of rules) {
+    const untilStamp = untilStampOf(rule, start.zone);
+    if (!stepRule(rule, start, untilStamp, options.from, options.to, spanMs, emit)) unfinished += 1;
+  }
+  return unfinished;
+}
+
+function processComponent(
+  component: IcalComponent,
+  calendarZone: string,
+  displayZone: string,
+  replaced: Map<string, Set<string>>,
+  options: ParseOptions,
+  keep: (item: Occurrence) => void,
+): number {
+  const start = firstStamp(component, "dtstart", calendarZone);
+  if (!start) return 1;
+  if (clean(component.getFirstPropertyValue("status"), 40).toUpperCase() === "CANCELLED") return 0;
+  const uid = clean(component.getFirstPropertyValue("uid"), 400);
+  const details: Details = {
+    uid,
+    title: clean(component.getFirstPropertyValue("summary"), TITLE_MAX) || "(No title)",
+    location: shortLocation(component.getFirstPropertyValue("location")),
+  };
+  const shape = shapeOf(component, start, calendarZone);
+  const spanMs = shape.allDay ? shape.days * DAY_MS : shape.wallDurationMs;
+  if (component.hasProperty("recurrence-id")) {
+    keep(occurrence(details, start, shape, displayZone));
+    return 0;
+  }
+  return processRrules(component, start, details, shape, calendarZone, displayZone, uid, replaced, options, spanMs, keep);
+}
+
 /**
  * Every event and recurrence instance in the window, soonest first. Throws if the text is not an
  * iCalendar file. `skipped` counts events left out because they could not be read with certainty
@@ -288,90 +408,9 @@ export function parseCalendar(text: string, options: ParseOptions): { events: Oc
   };
 
   const components = root.getAllSubcomponents("vevent");
-  const uidOf = (component: IcalComponent) => clean(component.getFirstPropertyValue("uid"), 400);
-
-  // Instances that have their own VEVENT (moved, renamed or cancelled) are taken from there, never from the rule.
-  const replaced = new Map<string, Set<string>>();
+  const replaced = buildReplacedMap(components, calendarZone);
   for (const component of components) {
-    const original = firstStamp(component, "recurrence-id", calendarZone);
-    if (!original) continue;
-    const uid = uidOf(component);
-    const keys = replaced.get(uid) ?? new Set<string>();
-    for (const key of stampKeys(original)) keys.add(key);
-    replaced.set(uid, keys);
-  }
-
-  for (const component of components) {
-    const start = firstStamp(component, "dtstart", calendarZone);
-    if (!start) {
-      skipped += 1;
-      continue;
-    }
-    if (clean(component.getFirstPropertyValue("status"), 40).toUpperCase() === "CANCELLED") continue;
-    const uid = uidOf(component);
-    const details: Details = {
-      uid,
-      title: clean(component.getFirstPropertyValue("summary"), TITLE_MAX) || "(No title)",
-      location: shortLocation(component.getFirstPropertyValue("location")),
-    };
-    const shape = shapeOf(component, start, calendarZone);
-    const spanMs = shape.allDay ? shape.days * DAY_MS : shape.wallDurationMs;
-
-    const isOverride = component.hasProperty("recurrence-id");
-    const rules = isOverride ? [] : component.getAllProperties("rrule").map((property) => property.getFirstValue()).filter((rule): rule is InstanceType<typeof ICAL.Recur> => rule instanceof ICAL.Recur);
-    const extra = isOverride ? [] : allStamps(component, "rdate", calendarZone);
-    if (!rules.length && !extra.length) {
-      keep(occurrence(details, start, shape, displayZone));
-      continue;
-    }
-
-    const gone = new Set<string>(replaced.get(uid));
-    for (const excluded of allStamps(component, "exdate", calendarZone)) for (const key of stampKeys(excluded)) gone.add(key);
-    const emit = (stamp: Stamp) => {
-      if (!instanceKeys(stamp).some((key) => gone.has(key))) keep(occurrence(details, stamp, shape, displayZone));
-    };
-
-    for (const stamp of extra) if (stamp.isDate === start.isDate) emit(stamp);
-    // With only RDATEs the start itself is an instance; a rule yields it on its own.
-    if (!rules.length) emit(start);
-
-    for (const rule of rules) {
-      // UNTIL is checked here, by instant: ical.js would compare it against a time it holds without a zone.
-      const until = isTime(rule.until) ? rule.until : null;
-      const untilStamp: Stamp | null = until
-        ? { isDate: until.isDate, wall: wallOf(until), zone: until.zone?.tzid === "UTC" ? "UTC" : start.zone }
-        : null;
-      const stepping = rule.clone();
-      stepping.until = null;
-      const iterator = stepping.iterator(ICAL.Time.fromData({ year: start.wall.y, month: start.wall.mo, day: start.wall.d, hour: start.wall.h, minute: start.wall.mi, second: start.wall.s, isDate: start.isDate }));
-      let reachedEnd = false;
-      for (let step = 0; step < MAX_RULE_STEPS; step += 1) {
-        const next = iterator.next();
-        if (!next) {
-          reachedEnd = true;
-          break;
-        }
-        const stamp: Stamp = { isDate: start.isDate, wall: wallOf(next), zone: start.zone };
-        // Wall time is within a day of the instant in any zone: enough to pass over the years before the window cheaply.
-        const roughly = wallMs(stamp.wall);
-        if (untilStamp) {
-          const past = stamp.isDate || untilStamp.isDate
-            ? dateNumber(stamp.wall) > dateNumber(untilStamp.wall)
-            : roughly - 2 * DAY_MS > wallMs(untilStamp.wall) || zonedToUtc(stamp.wall, stamp.zone) > zonedToUtc(untilStamp.wall, untilStamp.zone);
-          if (past) {
-            reachedEnd = true;
-            break;
-          }
-        }
-        if (roughly - 2 * DAY_MS >= options.to) {
-          reachedEnd = true;
-          break;
-        }
-        if (roughly + spanMs + 2 * DAY_MS <= options.from) continue;
-        emit(stamp);
-      }
-      if (!reachedEnd) skipped += 1;
-    }
+    skipped += processComponent(component, calendarZone, displayZone, replaced, options, keep);
   }
 
   const events = [...results.values()].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs || a.title.localeCompare(b.title));
@@ -505,6 +544,18 @@ async function refresh(url: string, kind: "address" | "public"): Promise<void> {
   }
 }
 
+function scheduleRefresh(from: { url: string; kind: "address" | "public" }, now: number): void {
+  if (runtime.url !== from.url) {
+    Object.assign(runtime, { url: from.url, events: [], fetchedAt: 0, attemptAt: 0, error: null, refreshing: null });
+  }
+  const wait = runtime.error ? RETRY_MS : REFRESH_MS;
+  if (runtime.refreshing || now - runtime.attemptAt < wait) return;
+  const run = refresh(from.url, from.kind).finally(() => {
+    if (runtime.refreshing === run) runtime.refreshing = null;
+  });
+  runtime.refreshing = run;
+}
+
 /** The current list, from memory. Starts a background refresh when one is due; never waits for it. */
 export function getEvents(now = Date.now()): EventsResponse {
   const base = { now: new Date(now).toISOString(), timeZone: EVENTS_TIME_ZONE };
@@ -512,17 +563,7 @@ export function getEvents(now = Date.now()): EventsResponse {
   if ("problem" in from) {
     return { ...base, status: "error", events: [], updatedAt: null, stale: false, message: from.problem };
   }
-  if (runtime.url !== from.url) {
-    Object.assign(runtime, { url: from.url, events: [], fetchedAt: 0, attemptAt: 0, error: null, refreshing: null });
-  }
-  const wait = runtime.error ? RETRY_MS : REFRESH_MS;
-  if (!runtime.refreshing && now - runtime.attemptAt >= wait) {
-    const run = refresh(from.url, from.kind).finally(() => {
-      if (runtime.refreshing === run) runtime.refreshing = null;
-    });
-    runtime.refreshing = run;
-  }
-
+  scheduleRefresh(from, now);
   const message = runtime.error ?? undefined;
   if (!runtime.fetchedAt || now - runtime.fetchedAt > KEEP_LAST_MS) {
     const status = runtime.error ? "error" : "loading";

@@ -39,6 +39,21 @@ const rotZ = (a: number): M3 => [cos(a), -sin(a), 0, sin(a), cos(a), 0, 0, 0, 1]
 const mul = (a: M3, b: M3): M3 => a.map((_, i) => a[i - i % 3] * b[i % 3] + a[i - i % 3 + 1] * b[i % 3 + 3] + a[i - i % 3 + 2] * b[i % 3 + 6]);
 const mix = (a: number[], b: number[], t: number) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join()})`;
 
+/** A copper coin, in the poster's burnt-orange family rather than the logo's gold. */
+const COPPER = {
+  face: "#F27B4A",
+  rim: "#FFCCB7",
+  recess: "#AE4104",
+  wellLight: "#F58A5A",
+  wellDark: "#D9581B",
+  shadow: "#7A300F",
+  relief: "#FFD9C9",
+  reliefMinor: "#FFF1EA",
+  edgeDark: [122, 48, 15],
+  edgeLight: [242, 123, 74],
+  tilt: [82, 30, 6],
+};
+
 type Logo = { path: Path2D; minor: boolean }[];
 let logo: Promise<Logo> | null = null;
 const loadLogo = () => (logo ??= fetch("/bab-logo.svg").then((r) => r.text()).then((svg) => [...svg.matchAll(/<path d="([^"]+)" fill="([^"]+)"/g)].map((m) => ({ path: new Path2D(m[1]), minor: m[2] !== "#FECB33" }))));
@@ -85,26 +100,26 @@ function disc(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, fi
 }
 
 function face(ctx: CanvasRenderingContext2D, tails: boolean, mark: Logo | null) {
-  disc(ctx, 0, 0, 1, "#FECB33");
+  disc(ctx, 0, 0, 1, COPPER.face);
   ctx.beginPath();
   ctx.arc(0, 0, .89, 0, 2 * PI);
   ctx.lineWidth = .018;
-  ctx.strokeStyle = "#FFE99A";
+  ctx.strokeStyle = COPPER.rim;
   ctx.stroke();
-  disc(ctx, 0, 0, .78, "#C06C0A");
+  disc(ctx, 0, 0, .78, COPPER.recess);
   const well = ctx.createLinearGradient(-.6, -.6, .6, .6);
-  well.addColorStop(0, "#F6AE22");
-  well.addColorStop(1, "#E3850E");
+  well.addColorStop(0, COPPER.wellLight);
+  well.addColorStop(1, COPPER.wellDark);
   ctx.save();
   ctx.clip();
   disc(ctx, .025, .035, .78, well);
   ctx.restore();
-  for (const [dx, dy, main, minor] of [[.03, .04, "#B25E08", "#B25E08"], [0, 0, "#FFE27A", "#FFF4C4"]] as const) {
+  for (const [dx, dy, main, minor] of [[.03, .04, COPPER.shadow, COPPER.shadow], [0, 0, COPPER.relief, COPPER.reliefMinor]] as const) {
     ctx.save();
     ctx.translate(dx, dy);
     if (tails) {
       ctx.scale(.0105, .0105);
-      ctx.font = "700 100px Inter, sans-serif";
+      ctx.font = `700 100px ${getComputedStyle(document.body).fontFamily}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillStyle = main;
@@ -177,13 +192,13 @@ function draw(ctx: CanvasRenderingContext2D, t: number, tails: boolean, mark: Lo
   const y = centre - 30 * lift + shakeY;
   const lean = hypot(R[2], R[5]);
   const lit = lean ? .5 - facing * (R[2] * LIGHT[0] + R[5] * LIGHT[1]) / lean / 2 : .5;
-  const [dx, dy] = solid(x, y, r, mix([169, 98, 12], [246, 178, 44], lit));
+  const [dx, dy] = solid(x, y, r, mix(COPPER.edgeDark, COPPER.edgeLight, lit));
 
   ctx.save();
   ctx.transform(r * e1[0], r * e1[1], r * e2[0], r * e2[1], x + dx, y + dy);
   if (facing < 0) ctx.scale(1, -1);
   face(ctx, facing < 0, mark);
-  disc(ctx, 0, 0, 1, `rgba(110, 52, 0, ${(1 - Math.abs(R[8])) * .3})`);
+  disc(ctx, 0, 0, 1, `rgba(${COPPER.tilt.join(", ")}, ${(1 - Math.abs(R[8])) * .3})`);
   ctx.restore();
 
   const since = t - (HOLD + WINDUP + FLIGHT + LANDED_AFTER);
@@ -191,7 +206,7 @@ function draw(ctx: CanvasRenderingContext2D, t: number, tails: boolean, mark: Lo
   STARS.forEach(([sx, sy, size], i) => {
     const life = ((since - i * .17 + 9) % 1.2) / .6;
     if (life >= 1 || since < i * .17) return;
-    ctx.fillStyle = i % 2 ? "#FFE99A" : "#FECB33";
+    ctx.fillStyle = i % 2 ? COPPER.rim : COPPER.face;
     star(ctx, centre + sx * RADIUS, centre + sy * RADIUS, size * RADIUS * sin(PI * life), life);
   });
 }

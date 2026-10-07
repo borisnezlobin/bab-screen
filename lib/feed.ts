@@ -10,9 +10,11 @@
 // The same refresh also feeds lib/newsworthy.ts (tokens in the news, served by /api/newsworthy).
 
 import { AgentError, agentPlan, fallbackOrder, pickWithAgent, type AgentAttempt } from "./feed-agent";
+import { labelItems } from "./feed-labels";
 import { gatherSources, type SourceCache, type SourceResult } from "./feed-fetch";
 import { cluster } from "./feed-parse";
 import {
+  ALERT_MAX_AGE_HOURS,
   HISTORY_SELECTIONS,
   IDLE_PAUSE_MINUTES,
   MAX_CANDIDATES,
@@ -88,20 +90,43 @@ function refreshMs(): number {
   return (Number.isFinite(minutes) && minutes >= 5 ? minutes : REFRESH_MINUTES) * 60_000;
 }
 
-const isItem = (value: unknown): value is FeedItem => {
-  if (typeof value !== "object" || value === null) return false;
-  const item = value as Record<string, unknown>;
+const HTTPS_RE = /^https?:\/\//;
+
+function isValidUrl(url: unknown): url is string {
+  return typeof url === "string" && HTTPS_RE.test(url);
+}
+
+function isValidFeedItem(item: Record<string, unknown>): boolean {
   return (
     typeof item.id === "string" &&
     (item.kind === "news" || item.kind === "tweet") &&
     typeof item.source === "string" &&
     typeof item.title === "string" &&
-    typeof item.url === "string" &&
-    /^https?:\/\//.test(item.url) &&
+    isValidUrl(item.url) &&
     typeof item.publishedAt === "string" &&
-    Number.isFinite(Date.parse(item.publishedAt))
+    Number.isFinite(Date.parse(item.publishedAt as string))
   );
+}
+
+const isItem = (value: unknown): value is FeedItem => {
+  if (typeof value !== "object" || value === null) return false;
+  return isValidFeedItem(value as Record<string, unknown>);
 };
+
+function hydrateStoredState(state: Stored, stored: Partial<Stored>): void {
+  if (Array.isArray(stored.items)) state.items = stored.items.filter(isItem).slice(0, MAX_ITEMS);
+  if (typeof stored.updatedAt === "string" && Number.isFinite(Date.parse(stored.updatedAt))) state.updatedAt = stored.updatedAt;
+  if (stored.curation === "agent") state.curation = "agent";
+  if (Array.isArray(stored.sources)) state.sources = stored.sources;
+  if (Array.isArray(stored.history)) {
+    state.history = stored.history
+      .filter(Array.isArray)
+      .slice(0, HISTORY_SELECTIONS)
+      .map((ids) => ids.filter((id): id is string => typeof id === "string"));
+  }
+  if (stored.agent && typeof stored.agent === "object") state.agent = stored.agent as AgentReport;
+  if (!state.items.length) state.updatedAt = null;
+}
 
 /** Reads .data/feed.json once per process. A missing, old or damaged file just means starting empty. */
 function load(): Promise<void> {
@@ -109,18 +134,7 @@ function load(): Promise<void> {
     const stored = await readJson<Partial<Stored>>(STATE_FILE);
     if (!stored || stored.version !== STATE_VERSION) return;
     const state = emptyState();
-    if (Array.isArray(stored.items)) state.items = stored.items.filter(isItem).slice(0, MAX_ITEMS);
-    if (typeof stored.updatedAt === "string" && Number.isFinite(Date.parse(stored.updatedAt))) state.updatedAt = stored.updatedAt;
-    if (stored.curation === "agent") state.curation = "agent";
-    if (Array.isArray(stored.sources)) state.sources = stored.sources;
-    if (Array.isArray(stored.history)) {
-      state.history = stored.history
-        .filter(Array.isArray)
-        .slice(0, HISTORY_SELECTIONS)
-        .map((ids) => ids.filter((id): id is string => typeof id === "string"));
-    }
-    if (stored.agent && typeof stored.agent === "object") state.agent = stored.agent;
-    if (!state.items.length) state.updatedAt = null;
+    hydrateStoredState(state, stored);
     runtime.state = state;
     // A restart inside the refresh interval shows the stored selection and waits its turn.
     if (state.updatedAt) runtime.lastRefreshAt = Date.parse(state.updatedAt);
@@ -178,9 +192,18 @@ export function buildCandidates(results: SourceResult[], lastShown: string[] = [
   return { pool: picked.sort(newestFirst), outlets };
 }
 
-function publish(ids: string[], pool: FeedItem[], curation: "agent" | "fallback", now: number, remember: boolean) {
+/** A pick the model filed under `alerts`, still recent enough to pin above the feed. */
+function isLiveAlert(item: FeedItem, alerts: ReadonlySet<string>, now: number) {
+  return alerts.has(item.id) && now - Date.parse(item.publishedAt) < ALERT_MAX_AGE_HOURS * 3_600_000;
+}
+
+function publish(ids: string[], pool: FeedItem[], curation: "agent" | "fallback", now: number, remember: boolean, alerts: ReadonlySet<string> = new Set()) {
   const byId = new Map(pool.map((item) => [item.id, item]));
-  const items = ids.map((id) => byId.get(id)).filter((item): item is FeedItem => Boolean(item)).slice(0, MAX_ITEMS);
+  const items = ids
+    .map((id) => byId.get(id))
+    .filter((item): item is FeedItem => Boolean(item))
+    .slice(0, MAX_ITEMS)
+    .map((item) => (isLiveAlert(item, alerts, now) ? { ...item, alert: true } : item));
   if (!items.length) return;
   const state = runtime.state;
   state.items = items;
@@ -210,7 +233,7 @@ async function refresh(): Promise<void> {
 
   try {
     const outcome = await pickWithAgent(pool, state.history, now, outlets);
-    publish(outcome.ids, pool, "agent", Date.now(), true);
+    publish(outcome.ids, pool, "agent", Date.now(), true, new Set(outcome.alerts));
     state.agent = { at: new Date().toISOString(), agent: outcome.agent, model: outcome.model, ms: outcome.ms, ok: true, error: null, attempts: outcome.attempts };
   } catch (error) {
     const code = error instanceof AgentError ? error.code : "internal_error";
@@ -218,6 +241,7 @@ async function refresh(): Promise<void> {
     state.agent = { at: new Date().toISOString(), agent: null, model: null, ms: null, ok: false, error: code, attempts: error instanceof AgentError ? error.attempts : [] };
     if (agentPlan().order.length) console.warn(`[feed] AI curation failed (${code}); using the fallback ordering`);
   }
+  state.items = await labelItems(state.items);
   await save();
   // The newsworthy tokens are chosen from the same fetch, after the feed is up. It keeps its own
   // schedule (not every refresh) and its own state, and never rejects.
@@ -262,29 +286,53 @@ export function ensureFeedLoop(): void {
   }
 }
 
-function response(): FeedResponse {
-  const state = runtime.state;
-  const picked = state.curation === "agent" && state.agent?.ok ? state.agent : null;
-  const base = {
+function pickedAgent(state: Stored): AgentReport | null {
+  return state.curation === "agent" && state.agent && state.agent.ok ? state.agent : null;
+}
+
+function feedBaseResponse(state: Stored) {
+  const picked = pickedAgent(state);
+  return {
     items: state.items,
     updatedAt: state.updatedAt,
     sources: state.sources,
     curation: state.curation,
-    agent: picked?.agent ?? null,
-    agentModel: picked?.model ?? null,
+    agent: picked ? picked.agent : null,
+    agentModel: picked ? picked.model : null,
   };
+}
+
+function failingSourceNote(failing: FeedSourceStatus[]): string | null {
+  if (!failing.length) return null;
+  return `${failing.length} source${failing.length === 1 ? "" : "s"} failing: ${failing.map((source) => source.name).join(", ")}`;
+}
+
+function agentCurationNote(state: Stored): string | null {
+  const agentError = state.agent ? state.agent.error : null;
+  if (state.curation !== "fallback" || !agentError || agentError === "agent_off") return null;
+  return `AI curation unavailable (${agentError}); showing the newest items`;
+}
+
+function feedStatusNotes(state: Stored, stale: boolean, failing: FeedSourceStatus[]): string[] {
+  const notes: (string | null)[] = [
+    stale ? "selection is stale" : null,
+    runtime.lastRefreshFailed ? (runtime.lastError ?? "last refresh failed") : null,
+    failingSourceNote(failing),
+    agentCurationNote(state),
+  ];
+  return notes.filter(Boolean) as string[];
+}
+
+function response(): FeedResponse {
+  const state = runtime.state;
+  const base = feedBaseResponse(state);
   if (!state.items.length) {
     if (runtime.lastRefreshFailed) return { status: "error", ...base, message: runtime.lastError ?? "refresh failed" };
     return { status: "empty", ...base, message: "First refresh in progress" };
   }
   const failing = state.sources.filter((source) => !source.ok);
   const stale = state.updatedAt !== null && Date.now() - Date.parse(state.updatedAt) > STALE_AFTER_MS;
-  const notes = [
-    stale ? "selection is stale" : null,
-    runtime.lastRefreshFailed ? (runtime.lastError ?? "last refresh failed") : null,
-    failing.length ? `${failing.length} source${failing.length === 1 ? "" : "s"} failing: ${failing.map((source) => source.name).join(", ")}` : null,
-    state.curation === "fallback" && state.agent?.error && state.agent.error !== "agent_off" ? `AI curation unavailable (${state.agent.error}); showing the newest items` : null,
-  ].filter(Boolean);
+  const notes = feedStatusNotes(state, stale, failing);
   const degraded = stale || runtime.lastRefreshFailed || failing.length > 0;
   return { status: degraded ? "degraded" : "ok", ...base, ...(notes.length ? { message: notes.join("; ") } : {}) };
 }

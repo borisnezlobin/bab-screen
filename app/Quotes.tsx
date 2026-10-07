@@ -1,13 +1,13 @@
 "use client";
 
 // Quotes from the club's Slack channel (/api/quotes, lib/quotes.ts) as slides for the photo carousel.
-// Nothing here rotates or fades on its own: the carousel that shows spotted photos owns the clock and
+// Nothing here rotates or fades on its own: the carousel (app/Carousel.tsx) owns the clock and
 // the crossfade, asks useQuoteDeck() for the next quote, and puts <QuoteFrame> where a photo goes
 // and <QuoteCaption> where a photo's caption goes.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { Quote, QuotesResponse } from "../lib/quotes";
-import styles from "./Quotes.module.css";
+import { cx, relativeAge } from "./ui";
 
 export type { Quote, QuotesResponse } from "../lib/quotes";
 
@@ -172,21 +172,7 @@ export function quoteSlideKind(quote: Quote): "photo" | "text" {
 }
 
 /** "3d ago" like a spot; a quote from another year shows its month and year. */
-export function quoteAge(postedAt: string | null, now: number = Date.now()): string | null {
-  const posted = postedAt ? Date.parse(postedAt) : NaN;
-  if (!Number.isFinite(posted)) return null;
-  const minutes = Math.floor((now - posted) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h ago`;
-  if (minutes < 60 * 24 * 7) return `${Math.floor(minutes / (60 * 24))}d ago`;
-  const date = new Date(posted);
-  return date.getFullYear() === new Date(now).getFullYear()
-    ? date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
-    : date.toLocaleDateString("en-US", { month: "short", year: "numeric" });
-}
-
-const cx = (...names: Array<string | false | null | undefined>) => names.filter(Boolean).join(" ");
+export const quoteAge = relativeAge;
 
 /** The words in the frame are set as large as fits, between these sizes (px on the 1920x1080 stage). */
 const FRAME_TEXT_MIN_PX = 32;
@@ -262,7 +248,7 @@ function Words({ text }: { text: string }) {
   return (
     <>
       {text.split("\n").map((line, index) => (
-        <span key={index} className={styles.turn}>{line}</span>
+        <span key={index} className="block pl-[0.7em] -indent-[0.7em]">{line}</span>
       ))}
     </>
   );
@@ -271,8 +257,8 @@ function Words({ text }: { text: string }) {
 function FrameText({ text }: { text: string }) {
   const { boxRef, textRef } = useFitText(text, FRAME_TEXT_MIN_PX, FRAME_TEXT_MAX_PX);
   return (
-    <div ref={boxRef} className={styles.frameBody}>
-      <p ref={textRef} className={cx(styles.frameQuote, text.length > BALANCE_MAX_CHARS && styles.frameQuoteLong)}><Words text={text} /></p>
+    <div ref={boxRef} className="flex size-full flex-col justify-end p-8">
+      <p ref={textRef} className={cx("line-clamp-6 w-full shrink-0 pb-1 font-narrow text-subhead leading-fit font-semibold wrap-anywhere", text.length > BALANCE_MAX_CHARS ? "text-pretty" : "text-balance")}><Words text={text} /></p>
     </div>
   );
 }
@@ -288,20 +274,20 @@ export type QuoteFrameProps = {
 
 /**
  * What goes in the carousel's image frame for one quote. It covers its positioned parent
- * (position: absolute; inset: 0), exactly like a spotted photo.
+ * (position: absolute; inset: 0), exactly like a chumming photo.
  *
  * With a picture: the picture, shown whole (contain) on the frame's dark ground, never cropped.
- * Without one: the words, in EB Garamond, as large as fits.
+ * Without one: the words, as large as fits.
  */
 export function QuoteFrame({ quote, className, style, onImageError }: QuoteFrameProps) {
   const [brokenUrl, setBrokenUrl] = useState<string | null>(null);
   const imageUrl = quote.imageUrl && quote.imageUrl !== brokenUrl ? quote.imageUrl : null;
 
   return (
-    <div className={cx(styles.frame, className)} style={style}>
+    <div className={cx("absolute inset-0 overflow-hidden bg-surface-sunk", className)} style={style}>
       {imageUrl ? (
         <img
-          className={styles.frameImage}
+          className="block size-full object-contain"
           src={imageUrl}
           alt={quote.text ?? (quote.who ? `Quote from ${quote.who}` : "Quote posted in Slack")}
           draggable={false}
@@ -317,76 +303,87 @@ export function QuoteFrame({ quote, className, style, onImageError }: QuoteFrame
   );
 }
 
-/** The quote under its picture, largest first: 48px on one line, 36px on two, 28px on three. */
-const CAPTION_STEPS = [null, styles.captionQuoteMedium, styles.captionQuoteSmall];
+/** The quote under its picture, largest first: one line at 48px, two at 36px, three at 28px. */
+const CAPTION_STEPS = [
+  "line-clamp-1 text-headline",
+  "line-clamp-2 text-subhead",
+  "line-clamp-3 text-title",
+] as const;
+const CAPTION_QUOTE = "font-narrow font-semibold text-balance wrap-anywhere";
 
 export type QuoteCaptionProps = {
   quote: Quote;
   /** Epoch ms the age is counted from; the carousel's ticking clock. Defaults to the time of rendering. */
   now?: number;
-  /** Added to the root, e.g. the carousel's caption class and its "is-active". */
-  className?: string;
-  style?: CSSProperties;
 };
 
-/**
- * What goes under the frame for one quote, built like a spot's caption: a headline in EB Garamond,
- * then one line with who posted it and when.
- *
- * Under a picture the headline is the quote itself, at the largest of three sizes at which it fits
- * whole (one line at 48px, two at 36px, three at 28px; longer than that is cut with an ellipsis),
- * and who said it leads the last line. That keeps every caption within 137px, the height the
- * carousel holds for them (.spot-caption.has-quotes in globals.css). Under a frame of words the headline is who
- * said it. When the message names nobody, nobody is credited with saying it: only "Quoted by",
- * the person who posted it.
- */
-export function QuoteCaption({ quote, now, className, style }: QuoteCaptionProps) {
-  const underPicture = quoteSlideKind(quote) === "photo";
-  const age = quoteAge(quote.postedAt, now);
-  const words = underPicture ? quote.text : null;
-  const whoAsHeadline = !words && quote.who;
-  const length = words?.length ?? 0;
-  // A first guess from the length, so the first paint is close; the layout effect below settles it by measuring.
-  const firstStep = words?.includes("\n") ? 2 : 0;
-  const guess = firstStep === 2 || length > 60 ? 2 : length > 22 ? 1 : 0;
-  const quoteRef = useRef<HTMLParagraphElement>(null);
+/** A first guess from the length, so the first paint is close; the layout effect settles it by measuring. */
+function firstCaptionStep(words: string | null) {
+  if (!words) return 0;
+  if (words.includes("\n") || words.length > 60) return 2;
+  return words.length > 22 ? 1 : 0;
+}
 
+/** Sets the quote at the largest caption step at which it fits whole. */
+function useCaptionFit(words: string | null) {
+  const quoteRef = useRef<HTMLParagraphElement>(null);
+  const firstStep = words?.includes("\n") ? 2 : 0;
   useLayoutEffect(() => {
     const element = quoteRef.current;
     if (!element) return;
     let alive = true;
     const fit = () => {
       if (!alive) return;
-      // Measured unclamped: the height is then a whole number of lines. (scrollHeight will not do: at these
-      // tight line heights Garamond's descenders reach below the box even when every line fits.)
-      element.style.setProperty("-webkit-line-clamp", "unset");
       for (let step = firstStep; step < CAPTION_STEPS.length; step += 1) {
-        element.className = cx(styles.captionQuote, CAPTION_STEPS[step]);
+        element.className = cx(CAPTION_QUOTE, CAPTION_STEPS[step], "line-clamp-none");
         const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
-        if (element.offsetHeight <= (step + 1) * lineHeight + 1) break;
+        if (element.offsetHeight <= (step + 1) * lineHeight + 1 || step === CAPTION_STEPS.length - 1) {
+          element.className = cx(CAPTION_QUOTE, CAPTION_STEPS[step]);
+          break;
+        }
       }
-      element.style.removeProperty("-webkit-line-clamp");
     };
     fit();
-    // The first fit may have been measured in the fallback face.
     void document.fonts?.ready.then(fit);
     return () => {
       alive = false;
     };
   }, [words, firstStep]);
+  return quoteRef;
+}
 
+function QuoteCredit({ quote, words }: { quote: Quote; words: string | null }) {
+  const saidBy = words ? quote.who : null;
+  if (saidBy && quote.poster) return <><span className="font-semibold text-text">{saidBy}</span>, quoted by {quote.poster}</>;
+  if (saidBy) return <span className="font-semibold text-text">{saidBy}</span>;
+  return quote.poster ? <>Quoted by {quote.poster}</> : null;
+}
+
+/**
+ * What goes under the frame for one quote. Under a picture the headline is the quote itself, at the largest of
+ * three sizes at which it fits whole, and who said it leads the last line. Under a frame of words the headline is
+ * who said it. When the message names nobody, nobody is credited with saying it: only "Quoted by", the poster.
+ */
+export function QuoteCaption({ quote, now }: QuoteCaptionProps) {
+  const words = quoteSlideKind(quote) === "photo" ? quote.text : null;
+  const whoAsHeadline = !words && quote.who;
+  const age = quoteAge(quote.postedAt, now);
+  const quoteRef = useCaptionFit(words);
   return (
-    <div className={cx(styles.caption, className)} style={style}>
-      {words && <p ref={quoteRef} className={cx(styles.captionQuote, CAPTION_STEPS[guess])}><Words text={words} /></p>}
-      {whoAsHeadline && <p className={styles.captionWho}>{quote.who}</p>}
-      <div className={styles.meta}>
-        <span className={styles.by}>
-          {words && quote.who && <span className={styles.byWho}>{quote.who}</span>}
-          {words && quote.who && quote.poster && <span className={styles.dot} aria-hidden="true">·</span>}
-          {quote.poster && <span>{words && quote.who ? "quoted by" : "Quoted by"} {quote.poster}</span>}
-        </span>
-        {age && <span className={styles.time}>{age}</span>}
-      </div>
+    <div className="flex min-w-0 flex-col gap-1.5">
+      {words && <p ref={quoteRef} className={cx(CAPTION_QUOTE, CAPTION_STEPS[firstCaptionStep(words)])}><Words text={words} /></p>}
+      {whoAsHeadline && <p className="line-clamp-1 font-narrow text-headline font-semibold">{quote.who}</p>}
+      <CaptionMeta age={age}><QuoteCredit quote={quote} words={words} /></CaptionMeta>
+    </div>
+  );
+}
+
+/** The last line of every carousel caption: who to credit on the left, how long ago on the right. */
+export function CaptionMeta({ age, children }: { age: string | null; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 text-body whitespace-nowrap text-text-secondary">
+      <span className="min-w-0 truncate">{children}</span>
+      {age && <span className="shrink-0 text-label text-text-muted">{age}</span>}
     </div>
   );
 }

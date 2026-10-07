@@ -4,7 +4,7 @@
 // tokens that /api/newsworthy hands the page at runtime (lib/newsworthy.ts). Prices are read in the browser, no
 // key needed, from one of two venues: Hyperliquid's perpetual market for the token (WebSocket, with REST as
 // the backstop), or, for a token Hyperliquid does not list, Gate's spot market against USDT (REST, polled).
-// The featured chart is TradingView's Advanced Chart widget showing that same market.
+// The featured chart draws the same market's candles (lib/candles.ts).
 
 export type Venue = "hyperliquid" | "gate";
 
@@ -19,12 +19,9 @@ export type Asset = {
   coin: string;
   /**
    * Tokens per contract. Hyperliquid quotes its "k" markets (kSHIB, kPEPE, kBONK) per 1,000 tokens;
-   * prices are divided by this as they are read, so the tape and header are per token.
-   * TradingView's chart cannot be rescaled and stays per contract.
+   * prices and candles are divided by this as they are read, so everything on screen is per token.
    */
   lot: number;
-  /** The same market on TradingView. A market whose chart will not load is left out of the featured slot. */
-  tv: string;
 };
 
 const HL_COIN = /^[A-Za-z0-9]{1,12}$/;
@@ -35,10 +32,10 @@ export function makeAsset(venue: Venue, market: string, symbol: string, name: st
   if (!Number.isFinite(lot) || lot < 1) return null;
   if (venue === "hyperliquid") {
     if (!HL_COIN.test(market)) return null;
-    return { symbol, name, venue, market, coin: market, lot, tv: `HYPERLIQUID:${market.toUpperCase()}USDC.P` };
+    return { symbol, name, venue, market, coin: market, lot };
   }
   if (venue !== "gate" || !GATE_PAIR.test(market)) return null;
-  return { symbol, name, venue, market, coin: `gate:${market}`, lot, tv: `GATE:${market.replace("_", "")}` };
+  return { symbol, name, venue, market, coin: `gate:${market}`, lot };
 }
 
 const hyperliquid = (symbol: string, name: string): Asset => makeAsset("hyperliquid", symbol, symbol, name) as Asset;
@@ -161,58 +158,6 @@ export function formatPrice(value: number, decimals?: number) {
   if (!Number.isFinite(value)) return "--";
   const digits = decimals ?? priceDecimals(value);
   return `$${value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
-}
-
-/** Where TradingView serves its embeddable widgets from, and what they post to the page as. */
-export const TV_WIDGET_ORIGIN = "https://www.tradingview-widget.com";
-/**
- * Candle width on the featured chart, in minutes. The widget has no "last 24 hours" setting (its "1D" range is
- * the day so far, from midnight UTC), so the window comes from how many candles fit: 48 of these across the
- * chart box at the zoom set in Markets.module.css is 24 hours. Change the two together, and with the column width.
- */
-export const CHART_INTERVAL = "30";
-/**
- * The chart is drawn inside TradingView's frame, which cannot read the page's CSS variables, so the two brand
- * colours it needs are repeated here: --bab-black (the canvas) and --bab-line (hairline rules) from app/brand.css.
- * The candle colours are TradingView's own; the widget offers no setting for them.
- */
-const CHART_BACKGROUND = "#0C0C0C";
-const CHART_GRID = "#2A2A2A";
-
-/**
- * The frame address for TradingView's Advanced Chart widget, bare: candles and volume, nothing to click.
- * This is the address TradingView's own embed script (embed-widget-advanced-chart.js) builds; the frame is
- * created directly because that script leaves a listener behind on every use, and the chart changes all day.
- */
-export function chartUrl(symbol: string) {
-  const page = window.location;
-  const settings = {
-    autosize: true,
-    symbol,
-    interval: CHART_INTERVAL,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    theme: "dark",
-    style: "1",
-    locale: "en",
-    backgroundColor: CHART_BACKGROUND,
-    gridColor: CHART_GRID,
-    hide_top_toolbar: true,
-    hide_side_toolbar: true,
-    hide_legend: true,
-    hide_volume: false,
-    allow_symbol_change: false,
-    save_image: false,
-    withdateranges: false,
-    details: false,
-    hotlist: false,
-    calendar: false,
-    support_host: "https://www.tradingview.com",
-    utm_source: page.hostname,
-    utm_medium: "widget_new",
-    utm_campaign: "advanced-chart",
-    "page-uri": `${page.host}${page.pathname}`,
-  };
-  return `${TV_WIDGET_ORIGIN}/embed-widget/advanced-chart/?locale=en#${encodeURIComponent(JSON.stringify(settings))}`;
 }
 
 export function formatChange(pct: number) {

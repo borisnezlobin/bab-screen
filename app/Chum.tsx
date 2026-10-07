@@ -1,12 +1,13 @@
 "use client";
 
 // Photos from the club's "chumming" Slack channel (/api/chum, lib/chum.ts) as slides for the photo
-// carousel. Like app/Quotes.tsx, nothing here rotates on its own: the carousel in app/page.tsx owns
-// the clock, asks the deck which photo comes next, and puts <ChumCaption> where a spot's caption goes.
+// carousel. Like app/Quotes.tsx, nothing here rotates on its own: the carousel in app/Carousel.tsx owns
+// the clock, asks the deck which photo comes next, and puts <ChumCaption> under the photo.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChumPhoto, ChumResult } from "../lib/chum";
-import { quoteAge } from "./Quotes";
+import { CaptionMeta, quoteAge } from "./Quotes";
+import { cx, nameList } from "./ui";
 
 export type { ChumPhoto, ChumResult } from "../lib/chum";
 
@@ -107,8 +108,6 @@ export function createChumDeck(random: () => number = Math.random): ChumDeck {
 
 // --- The caption -------------------------------------------------------------------------------
 
-const nameList = new Intl.ListFormat("en-US", { style: "long", type: "conjunction" });
-
 /**
  * The message is worth a line of its own only when it says more than who was there: "tane w/ @Name"
  * does, "@Name @Name", "chum @Name" and "chumming with @Name" do not.
@@ -176,7 +175,7 @@ export function ChumCaption({ photo, now }: { photo: ChumPhoto; now?: number }) 
 
   const [choice, setChoice] = useState(0);
   const headlineRef = useRef<HTMLParagraphElement>(null);
-  const className = (headline: Headline) => `chum-names${headline.small ? " is-small" : ""}${headline.lines === 2 ? " is-two" : ""}`;
+  const className = (headline: Headline) => cx("font-narrow font-semibold wrap-anywhere", headline.small ? "text-subhead" : "text-headline", headline.lines === 2 ? "line-clamp-2" : "line-clamp-1");
   const shown = candidates[Math.min(choice, candidates.length - 1)];
 
   useLayoutEffect(() => {
@@ -187,6 +186,7 @@ export function ChumCaption({ photo, now }: { photo: ChumPhoto; now?: number }) 
       if (!alive) return;
       // Measured unclamped: the height is then a whole number of lines.
       element.style.setProperty("-webkit-line-clamp", "unset");
+      element.style.display = "block";
       let chosen = candidates.length - 1;
       for (let index = 0; index < candidates.length; index += 1) {
         const headline = candidates[index];
@@ -199,6 +199,7 @@ export function ChumCaption({ photo, now }: { photo: ChumPhoto; now?: number }) 
         }
       }
       element.style.removeProperty("-webkit-line-clamp");
+      element.style.removeProperty("display");
       // The element is left showing the chosen headline, which is what the next render asks for too.
       element.className = className(candidates[chosen]);
       element.textContent = candidates[chosen].text;
@@ -213,13 +214,10 @@ export function ChumCaption({ photo, now }: { photo: ChumPhoto; now?: number }) 
   }, [candidates]);
 
   return (
-    <>
+    <div className="flex min-w-0 flex-col gap-1.5">
       <p ref={headlineRef} className={className(shown)}>{shown.text}</p>
-      {noteLine && shown.note && <p className="spot-text is-one-line">{noteLine}</p>}
-      <div className="spot-meta">
-        <span className="spot-by">{credit}</span>
-        {age && <span className="spot-time">{age}</span>}
-      </div>
-    </>
+      {noteLine && shown.note && <p className="truncate text-body text-text-secondary">{noteLine}</p>}
+      <CaptionMeta age={age}>{credit}</CaptionMeta>
+    </div>
   );
 }

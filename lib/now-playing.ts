@@ -28,6 +28,9 @@ const FAILURE_CACHE_MS = 10_000;
 const OSASCRIPT_TIMEOUT_MS = 4_000;
 const SPOTIFY_BUNDLE_ID = "com.spotify.client";
 
+const HTTPS_URL_RE = /^https?:\/\//i;
+const HTTP_TO_HTTPS_RE = /^http:\/\//i;
+
 // JXA rather than AppleScript so the fields come back as JSON: track names can hold any punctuation, newlines or emoji.
 // `running()` does not launch the app, and nothing else is sent unless it is already running.
 const READ_SCRIPT = `
@@ -82,30 +85,21 @@ function blank(status: NowPlayingStatus, reason?: NowPlaying["reason"]): NowPlay
   return { status, ...(reason ? { reason } : {}), title: null, artists: null, album: null, artworkUrl: null, durationMs: null, positionMs: null, trackId: null, queuedBy: null, queuedAt: null, fetchedAt: Date.now() };
 }
 
-async function read(): Promise<NowPlaying> {
-  // Cheap first check that cannot launch anything; pgrep exits 1 when there is no such process.
-  const probe = await run("/usr/bin/pgrep", ["-x", "Spotify"], 2_000);
-  if (probe.code === 1) return blank("not_running");
-
-  const result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", READ_SCRIPT, SPOTIFY_BUNDLE_ID], OSASCRIPT_TIMEOUT_MS);
+function interpretOsaError(result: { timedOut: boolean; code: number | null; stderr: string }): NowPlaying | null {
   if (result.timedOut) return blank("unavailable", "timeout");
   if (result.code !== 0) return blank("unavailable", isPermissionError(result.stderr) ? "automation_permission" : "error");
+  return null;
+}
 
-  let raw: Raw;
-  try {
-    raw = JSON.parse(result.stdout) as Raw;
-  } catch {
-    return blank("unavailable", "error");
-  }
+function interpretRawErrors(raw: Raw): NowPlaying | null {
   if (!raw.running) return blank("not_running");
   if (raw.error) return blank("unavailable", isPermissionError(`${raw.error} ${String(raw.errorNumber)}`) ? "automation_permission" : "error");
   if (raw.trackError && isPermissionError(raw.trackError)) return blank("unavailable", "automation_permission");
+  return null;
+}
 
+function buildTrackResult(raw: Raw, track: NonNullable<Raw["track"]>, title: string): NowPlaying {
   const status: NowPlayingStatus = raw.state === "playing" || raw.state === "paused" ? raw.state : "stopped";
-  const track = raw.track;
-  const title = text(track?.name);
-  if (!track || !title) return blank("stopped");
-
   const artwork = text(track.artworkUrl);
   const durationMs = count(track.duration);
   const seconds = count(raw.position);
@@ -116,7 +110,7 @@ async function read(): Promise<NowPlaying> {
     artists: text(track.artist),
     album: text(track.album),
     // Local files, some podcasts and ads have no artwork (or a non-web one).
-    artworkUrl: artwork && /^https?:\/\//i.test(artwork) ? artwork.replace(/^http:\/\//i, "https://") : null,
+    artworkUrl: artwork && HTTPS_URL_RE.test(artwork) ? artwork.replace(HTTP_TO_HTTPS_RE, "https://") : null,
     durationMs: durationMs && durationMs > 0 ? Math.round(durationMs) : null,
     positionMs: positionMs !== null && durationMs ? Math.min(positionMs, durationMs) : positionMs,
     trackId: text(track.id),
@@ -125,6 +119,41 @@ async function read(): Promise<NowPlaying> {
     queuedAt: null,
     fetchedAt: Date.now(),
   };
+}
+
+async function read(): Promise<NowPlaying> {
+  // Cheap first check that cannot launch anything; pgrep exits 1 when there is no such process.
+  const probe = await run("/usr/bin/pgrep", ["-x", "Spotify"], 2_000);
+  if (probe.code === 1) return blank("not_running");
+
+  const result = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", READ_SCRIPT, SPOTIFY_BUNDLE_ID], OSASCRIPT_TIMEOUT_MS);
+  const osaError = interpretOsaError(result);
+  if (osaError) return osaError;
+
+  let raw: Raw;
+  try {
+    raw = JSON.parse(result.stdout) as Raw;
+  } catch {
+    return blank("unavailable", "error");
+  }
+  const rawError = interpretRawErrors(raw);
+  if (rawError) return rawError;
+
+  const track = raw.track;
+  const title = text(track?.name);
+  if (!track || !title) return blank("stopped");
+  return buildTrackResult(raw, track, title);
+}
+
+function advancePosition(value: NowPlaying, now: number): NowPlaying {
+  if (value.status !== "playing" || value.positionMs === null) return { ...value, fetchedAt: now };
+  const position = value.positionMs + (now - value.fetchedAt);
+  return { ...value, positionMs: value.durationMs ? Math.min(position, value.durationMs) : position, fetchedAt: now };
+}
+
+async function fetchCreditedValue(latest: NowPlaying): Promise<NowPlaying> {
+  const credit = latest.status === "playing" || latest.status === "paused" ? await getSongCredit(latest.trackId) : null;
+  return { ...latest, queuedBy: credit?.queuedBy ?? null, queuedAt: credit?.queuedAt ?? null };
 }
 
 let cached: NowPlaying | null = null;
@@ -144,12 +173,6 @@ export async function getNowPlaying(): Promise<NowPlaying> {
     await pending;
   }
   const latest = cached as NowPlaying;
-  // Looked up on every reply, not cached with the read: a request can be logged while its track is already playing.
-  const credit = latest.status === "playing" || latest.status === "paused" ? await getSongCredit(latest.trackId) : null;
-  const value: NowPlaying = { ...latest, queuedBy: credit?.queuedBy ?? null, queuedAt: credit?.queuedAt ?? null };
-  // Carry the position forward to the moment of the reply so a cached read is not behind.
-  const now = Date.now();
-  if (value.status !== "playing" || value.positionMs === null) return { ...value, fetchedAt: now };
-  const position = value.positionMs + (now - value.fetchedAt);
-  return { ...value, positionMs: value.durationMs ? Math.min(position, value.durationMs) : position, fetchedAt: now };
+  const value = await fetchCreditedValue(latest);
+  return advancePosition(value, Date.now());
 }

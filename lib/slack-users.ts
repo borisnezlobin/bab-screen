@@ -177,22 +177,25 @@ function mentionedUserId(body: string): string | null {
   return USER_ID.test(id) ? id : null;
 }
 
+function renderAtToken(body: string, names: Map<string, string>): string {
+  const { target, label } = splitLabel(body.slice(1));
+  const name = names.get(target) ?? label?.replace(/^@/, "");
+  return name ? `@${name}` : "";
+}
+
+function renderSpecialMention(body: string): string {
+  const { target, label } = splitLabel(body.slice(1));
+  if (target === "here" || target === "channel" || target === "everyone") return `@${target}`;
+  return label ?? "";
+}
+
 function renderToken(body: string, names: Map<string, string>): string {
-  if (body.startsWith("@")) {
-    const { target, label } = splitLabel(body.slice(1));
-    const name = names.get(target) ?? label?.replace(/^@/, "");
-    return name ? `@${name}` : "";
-  }
+  if (body.startsWith("@")) return renderAtToken(body, names);
   if (body.startsWith("#")) {
     const { label } = splitLabel(body.slice(1));
     return label ? `#${label.replace(/^#/, "")}` : "";
   }
-  if (body.startsWith("!")) {
-    const { target, label } = splitLabel(body.slice(1));
-    if (target === "here" || target === "channel" || target === "everyone") return `@${target}`;
-    // <!subteam^S123|@group>, <!date^…|fallback text>
-    return label ?? "";
-  }
+  if (body.startsWith("!")) return renderSpecialMention(body);
   const { target, label } = splitLabel(body);
   if (label) return label;
   return decodeEntities(target).replace(/^(mailto|tel):/, "");
@@ -210,26 +213,29 @@ function renderText(text: string, names: Map<string, string>): string | null {
 
   const tidy = output
     .split("\n")
-    .map((line) => line.replace(/[ \t ]+/g, " ").trim())
+    .map((line) => line.replace(/[ \t\xa0]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return tidy || null;
 }
 
+function buildMentionLabels(text: string): Map<string, string | null> {
+  const labels = new Map<string, string | null>();
+  for (const match of text.matchAll(TOKEN)) {
+    const id = mentionedUserId(match[1]);
+    if (!id) continue;
+    const label = splitLabel(match[1].slice(1)).label?.replace(/^@/, "") || null;
+    if (!labels.has(id) || (!labels.get(id) && label)) labels.set(id, label);
+  }
+  return labels;
+}
+
 /** Names for one spot message. Never throws. */
 export async function describeSpot(message: SpotMessage): Promise<SpotDescription> {
   try {
     const text = typeof message?.text === "string" ? message.text : "";
-
-    // Mentioned users in order of first appearance, deduped; keep any <@U…|label> as a fallback name.
-    const labels = new Map<string, string | null>();
-    for (const match of text.matchAll(TOKEN)) {
-      const id = mentionedUserId(match[1]);
-      if (!id) continue;
-      const label = splitLabel(match[1].slice(1)).label?.replace(/^@/, "") || null;
-      if (!labels.has(id) || (!labels.get(id) && label)) labels.set(id, label);
-    }
+    const labels = buildMentionLabels(text);
     const mentionedIds = [...labels.keys()];
 
     const [spotterName, ...mentionedNames] = await Promise.all([

@@ -2,8 +2,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { NewsworthyResponse, NewsworthyToken } from "@/lib/feed-types";
-import { HL_WS_URL, SET_ASSETS, TV_WIDGET_ORIGIN, chartUrl, fetchGateQuotes, fetchHyperliquidQuotes, formatChange, formatPrice, makeAsset, quoteFromCtx, type Asset, type Quote, type Quotes } from "@/lib/markets";
-import styles from "./Markets.module.css";
+import { HL_WS_URL, SET_ASSETS, fetchGateQuotes, fetchHyperliquidQuotes, formatChange, formatPrice, makeAsset, quoteFromCtx, type Asset, type Quote, type Quotes } from "@/lib/markets";
+import { CandleChart } from "./CandleChart";
+import { Panel, Shard, cx } from "./ui";
 
 /** How long a set token stays in the featured slot. */
 export const FEATURE_MS = 10_000;
@@ -19,8 +20,6 @@ export const TAPE_SECONDS_PER_ITEM = 2.5;
 // A quote older than this is not shown; with none left the components fall back to "unavailable".
 const STALE_MS = 60_000;
 const LOADING_GRACE_MS = 10_000;
-// The chart widget says when its page has loaded but not when it has drawn; drawing takes about a second more.
-const CHART_SETTLE_MS = 3_000;
 /** A chart that has not loaded after this long is given up on, and its market left out of the rotation ... */
 const CHART_TIMEOUT_MS = 30_000;
 /** ... until this much later. */
@@ -80,22 +79,34 @@ const SET_SYMBOLS = new Set(SET_ASSETS.map((a) => a.symbol));
 
 const text = (value: unknown, max: number) => (typeof value === "string" && value.trim() && value.trim().length <= max ? value.trim() : null);
 
+function outletsOf(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((outlet) => text(outlet, 40)).filter((outlet): outlet is string => outlet !== null).slice(0, 4);
+}
+
+/** One route entry as a story, or null if it is malformed or names a market this page cannot read. */
+function storyFrom(entry: unknown): Story | null {
+  if (!entry || typeof entry !== "object") return null;
+  const token = entry as Partial<Record<keyof NewsworthyToken, unknown>>;
+  const symbol = text(token.symbol, 12);
+  const name = text(token.name, 48);
+  const market = text(token.market, 24);
+  const summary = text(token.summary, NEWS_SUMMARY_MAX_CHARS);
+  const venue = token.venue === "hyperliquid" || token.venue === "gate" ? token.venue : null;
+  if (!symbol || !name || !market || !summary || !venue) return null;
+  const asset = makeAsset(venue, market, symbol, name, Number(token.lot));
+  if (!asset || SET_COINS.has(asset.coin) || SET_SYMBOLS.has(symbol)) return null;
+  return { asset, summary, outlets: outletsOf(token.outlets), newestAt: text(token.newestAt, 40) ?? "" };
+}
+
 /** The route's tokens, checked again: well-formed, on a venue this page can read, and not a set token. */
 function cleanStories(raw: unknown): Story[] {
   if (!Array.isArray(raw)) return [];
   const stories: Story[] = [];
   for (const entry of raw) {
-    if (!entry || typeof entry !== "object") continue;
-    const token = entry as Partial<Record<keyof NewsworthyToken, unknown>>;
-    const symbol = text(token.symbol, 12);
-    const name = text(token.name, 48);
-    const market = text(token.market, 24);
-    const summary = text(token.summary, NEWS_SUMMARY_MAX_CHARS);
-    if (!symbol || !name || !market || !summary || (token.venue !== "hyperliquid" && token.venue !== "gate")) continue;
-    const asset = makeAsset(token.venue, market, symbol, name, Number(token.lot));
-    if (!asset || SET_COINS.has(asset.coin) || SET_SYMBOLS.has(symbol) || stories.some((s) => s.asset.coin === asset.coin)) continue;
-    const outlets = Array.isArray(token.outlets) ? token.outlets.map((outlet) => text(outlet, 40)).filter((outlet): outlet is string => outlet !== null).slice(0, 4) : [];
-    stories.push({ asset, summary, outlets, newestAt: text(token.newestAt, 40) ?? "" });
+    const story = storyFrom(entry);
+    if (!story || stories.some((s) => s.asset.coin === story.asset.coin)) continue;
+    stories.push(story);
     if (stories.length === NEWS_MAX_TOKENS) break;
   }
   return stories;
@@ -429,30 +440,32 @@ export function MarketsProvider({ children, featureMs = FEATURE_MS, newsFeatureM
   return <MarketsContext.Provider value={value}>{children}</MarketsContext.Provider>;
 }
 
+function TapeItem({ asset, quote }: { asset: Asset; quote: Quote }) {
+  return (
+    <span className="flex shrink-0 items-baseline gap-3 px-6">
+      <span className="font-semibold">{asset.symbol}</span>
+      <span className="text-text-secondary">{formatPrice(quote.price)}</span>
+      <span className={cx("font-medium", quote.changePct < 0 ? "text-down" : "text-up")}>{formatChange(quote.changePct)}</span>
+      <Shard tone="muted" size="sm" className="ml-6 self-center" />
+    </span>
+  );
+}
+
 /** Scrolling strip of every tracked market: symbol, price, 24-hour change. Fills its container. */
 export function TickerTape() {
   const { status, assets, quotes } = useMarkets();
   if (!assets.length) {
-    return <div className={styles.tape}><p className={styles.tapeNote}>{status === "loading" ? "Loading markets…" : "Market data unavailable"}</p></div>;
+    return <p className="flex h-full items-center px-7 text-title text-text-muted">{status === "loading" ? "Loading markets…" : "Market data unavailable"}</p>;
   }
   // Each half must be wider than the strip for the loop to be seamless, so a short list is repeated.
   const repeats = Math.ceil(TAPE_MIN_ITEMS / assets.length);
   const group = Array.from({ length: repeats }, () => assets).flat();
   return (
-    <div className={styles.tape}>
-      <div className={styles.tapeTrack} style={{ animationDuration: `${group.length * TAPE_SECONDS_PER_ITEM}s` }}>
+    <div className="fade-x flex h-full items-center overflow-hidden font-narrow text-title whitespace-nowrap figures">
+      <div className="flex shrink-0 animate-tape will-change-transform" style={{ animationDuration: `${group.length * TAPE_SECONDS_PER_ITEM}s` }}>
         {[0, 1].map((half) => (
-          <div key={half} className={styles.tapeGroup} aria-hidden={half === 1}>
-            {group.map((asset, i) => {
-              const quote = quotes[asset.coin];
-              return (
-                <span key={`${asset.coin}:${i}`} className={styles.tapeItem}>
-                  <span className={styles.tapeSymbol}>{asset.symbol}</span>
-                  <span>{formatPrice(quote.price)}</span>
-                  <span className={quote.changePct < 0 ? styles.down : styles.up}>{formatChange(quote.changePct)}</span>
-                </span>
-              );
-            })}
+          <div key={half} className="flex shrink-0" aria-hidden={half === 1}>
+            {group.map((asset, i) => <TapeItem key={`${asset.coin}:${i}`} asset={asset} quote={quotes[asset.coin]} />)}
           </div>
         ))}
       </div>
@@ -460,124 +473,82 @@ export function TickerTape() {
   );
 }
 
-/**
- * TradingView's Advanced Chart widget for the featured market: candles with volume, from TradingView's own
- * Hyperliquid feed. The next market's chart loads underneath the current one and is uncovered at the swap,
- * so a chart is never seen loading. The outgoing frame is removed, so only two exist at a time.
- */
-function Chart({ featured, next, onLoaded }: { featured: Asset; next: Asset | null; onLoaded: (coin: string, ok: boolean) => void }) {
-  const frames = useRef(new Map<string, HTMLIFrameElement>());
-
-  useEffect(() => {
-    const timers = new Set<number>();
-    const onMessage = (event: MessageEvent) => {
-      if (event.origin !== TV_WIDGET_ORIGIN) return;
-      const coin = [...frames.current].find(([, frame]) => frame.contentWindow === event.source)?.[0];
-      if (!coin) return;
-      let name: unknown;
-      try { name = (typeof event.data === "string" ? JSON.parse(event.data) : event.data)?.name; } catch { return; }
-      if (name === "tv-widget-no-data") onLoaded(coin, false);
-      if (name !== "tv-widget-load") return;
-      // Frames stay invisible until TradingView answers, so an unreachable widget shows the note, not a browser error page.
-      frames.current.get(coin)?.setAttribute("data-loaded", "");
-      const timer = window.setTimeout(() => {
-        timers.delete(timer);
-        if (frames.current.has(coin)) onLoaded(coin, true);
-      }, CHART_SETTLE_MS);
-      timers.add(timer);
-    };
-    window.addEventListener("message", onMessage);
-    return () => { window.removeEventListener("message", onMessage); timers.forEach((timer) => window.clearTimeout(timer)); };
-  }, [onLoaded]);
-
-  // Featured first, next second: React leaves the next market's frame in place when it becomes the featured one.
-  const shown = next && next.coin !== featured.coin ? [featured, next] : [featured];
-  return (
-    <div className={styles.chart}>
-      <div className={styles.chartFrames}>
-        <p className={styles.chartNote}>Loading chart…</p>
-        {shown.map((asset) => (
-          <iframe
-            key={asset.coin}
-            ref={(frame) => { if (frame) frames.current.set(asset.coin, frame); else frames.current.delete(asset.coin); }}
-            className={asset.coin === featured.coin ? `${styles.chartFrame} ${styles.chartFront}` : styles.chartFrame}
-            src={chartUrl(asset.tv)}
-            title={`${asset.name} candlestick chart with volume, by TradingView`}
-            aria-hidden={asset.coin !== featured.coin}
-            tabIndex={-1}
-          />
-        ))}
-      </div>
-      <p className={styles.chartCredit}>
-        <span>{featured.lot > 1 ? `Chart is priced per ${featured.lot.toLocaleString("en-US")} ${featured.symbol}` : featured.venue === "gate" && "Price and chart: Gate spot market"}</span>
-        <a href="https://www.tradingview.com/" target="_blank" rel="noopener nofollow">Track all markets on TradingView</a>
-      </p>
-    </div>
-  );
-}
-
-/** Symbol, name, price and 24-hour change. Sized for the longest case; shrinks to fit if a line ever runs over. */
-function Header({ asset, quote }: { asset: Asset; quote: Quote | undefined }) {
+/** Scales the block down to fit its box if a long name or price would run past the column. */
+function useFitWidth(deps: readonly unknown[]) {
   const box = useRef<HTMLDivElement>(null);
   const block = useRef<HTMLDivElement>(null);
-  const name = useRef<HTMLSpanElement>(null);
-  const price = quote ? formatPrice(quote.price) : "--";
-  const change = quote ? formatChange(quote.changePct) : "";
-
   useLayoutEffect(() => {
     const fit = () => {
       if (!box.current || !block.current) return;
+      block.current.style.transform = "";
       const room = box.current.clientWidth;
-      const label = name.current;
-      if (label) label.style.fontSize = "";
-      let need = block.current.offsetWidth;
-      // A long name gives way before the price does: it alone is set smaller, down to half its size.
-      if (label && need > room && room > 0) {
-        const width = label.offsetWidth;
-        const ratio = Math.max(NAME_MIN_SCALE, (width - (need - room)) / width);
-        label.style.fontSize = `${Math.floor(parseFloat(getComputedStyle(label).fontSize) * ratio)}px`;
-        const after = block.current.offsetWidth;
-        if (after < need) need = after; else label.style.fontSize = "";
-      }
-      // Whatever is still too wide (a very long price) scales the whole block.
-      block.current.style.transform = need > room && room > 0 ? `scale(${room / need})` : "";
+      const need = block.current.scrollWidth;
+      if (need > room && room > 0) block.current.style.transform = `scale(${Math.max(NAME_MIN_SCALE, room / need)})`;
     };
     fit();
     let cancelled = false;
     document.fonts?.ready.then(() => { if (!cancelled) fit(); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [asset.coin, price, change]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  return { box, block };
+}
 
+/** The ticker is worth showing beside the name only when it says something the name does not ("BNB BNB"). */
+export function showsSymbol(asset: Pick<Asset, "name" | "symbol">) {
+  return asset.name.trim().toLowerCase() !== asset.symbol.trim().toLowerCase();
+}
+
+function Header({ asset, quote }: { asset: Asset; quote: Quote | undefined }) {
+  const price = quote ? formatPrice(quote.price) : "--";
+  const change = quote ? formatChange(quote.changePct) : "";
+  const { box, block } = useFitWidth([asset.coin, price, change]);
   return (
-    <div ref={box} className={`${styles.header} ${styles.swap}`}>
-      <div ref={block} className={styles.headerBlock}>
-        <span className={styles.symbol}>{asset.symbol}</span>
-        <span className={styles.price}>{price}</span>
-        <span ref={name} className={styles.name}>{asset.name}</span>
-        <span className={styles.change}>
-          {quote && <span className={quote.changePct < 0 ? styles.down : styles.up}>{change}</span>}
-          {quote && <span className={styles.period}>24h</span>}
-        </span>
+    <div ref={box} className="min-w-0 animate-swap-in overflow-hidden">
+      <div ref={block} className="inline-flex origin-left flex-col gap-3 whitespace-nowrap">
+        <p className="flex items-baseline gap-4">
+          <span className="font-narrow text-headline font-semibold">{asset.name}</span>
+          {showsSymbol(asset) && <span className="text-title font-medium text-text-muted">{asset.symbol}</span>}
+        </p>
+        <p className="flex items-baseline gap-8">
+          <span className="font-narrow text-display font-semibold figures">{price}</span>
+          {quote && (
+            <span className="flex items-baseline gap-3 text-title figures">
+              <span className={cx("font-semibold", quote.changePct < 0 ? "text-down" : "text-up")}>{change}</span>
+              <span className="text-text-muted">24h</span>
+            </span>
+          )}
+        </p>
       </div>
     </div>
   );
 }
 
-/** One market at a time: header on top, its TradingView chart filling the rest. Fills its container. */
+function venueNote(asset: Asset) {
+  return asset.venue === "gate" ? "Gate spot market, priced in USDT" : "Hyperliquid perpetual, priced in USDC";
+}
+
+/** One market at a time: name and price on top, its last 24 hours of candles below. Fills its container. */
 export function FeaturedMarket() {
   const { status, quotes, featured, next, chartLoaded } = useMarkets();
   if (status !== "live") {
     return (
-      <section className={styles.featured}>
-        <div className={styles.header}><p className={styles.headerNote}>{status === "loading" ? "Loading markets…" : "Market data unavailable"}</p></div>
-        <div className={styles.chartEmpty} />
+      <section className="grid h-full grid-rows-[auto_minmax(0,1fr)] gap-8">
+        <p className="text-hero font-semibold text-text-muted">{status === "loading" ? "Loading markets…" : "Market data unavailable"}</p>
+        <Panel />
       </section>
     );
   }
+  const quote = quotes[featured.coin];
   return (
-    <section className={styles.featured} aria-label={`${featured.name} price`}>
-      <Header key={featured.coin} asset={featured} quote={quotes[featured.coin]} />
-      <Chart featured={featured} next={next} onLoaded={chartLoaded} />
+    <section className="grid h-full grid-rows-[auto_minmax(0,1fr)] gap-8" aria-label={`${featured.name} price`}>
+      <Header key={featured.coin} asset={featured} quote={quote} />
+      <Panel className="flex flex-col gap-3 border-t border-rule pt-6">
+        <div className="min-h-0 flex-1">
+          <CandleChart featured={featured} next={next} price={quote?.price ?? null} onLoaded={chartLoaded} />
+        </div>
+        <p className="text-meta text-text-muted">{venueNote(featured)}</p>
+      </Panel>
     </section>
   );
 }

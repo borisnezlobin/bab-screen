@@ -2,6 +2,10 @@
 
 export type FeedKind = "news" | "tweet";
 
+/** The kinds of item the feed can label (lib/feed-labels.ts). */
+export const FEED_LABELS = ["breaking", "release", "announcement", "research", "event"] as const;
+export type FeedLabel = (typeof FEED_LABELS)[number];
+
 export type FeedItem = {
   /** Stable across refreshes: a hash of the source and the item's guid or URL. */
   id: string;
@@ -21,6 +25,10 @@ export type FeedItem = {
   publishedAt: string;
   /** https thumbnail, or null. */
   imageUrl: string | null;
+  /** A current safety incident on or near campus: pinned above the scrolling feed. Only set on served items. */
+  alert?: boolean;
+  /** What kind of item this is, when the labelling model is sure of it. Only set on served items. */
+  label?: FeedLabel;
 };
 
 export type FeedSourceStatus = {

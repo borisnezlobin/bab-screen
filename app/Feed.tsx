@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import type { FeedItem, FeedResponse } from "@/lib/feed-types";
-import { useFeaturedStory, type Story } from "./Markets";
-import styles from "./Story.module.css";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FEED_LABELS, type FeedItem, type FeedLabel, type FeedResponse } from "@/lib/feed-types";
+import { showsSymbol, useFeaturedStory, type Story } from "./Markets";
+import { EmptyNote, Panel, Shard, cx } from "./ui";
 
 /** How fast the list drifts downward, in stage pixels per second. The loop takes as long as the list is tall. */
 export const FEED_SCROLL_PX_PER_S = 30;
@@ -50,6 +50,8 @@ function clean(raw: unknown): FeedItem[] {
       publishedAt: text(item.publishedAt) ?? "",
       // Thumbnails are not shown: in a column this narrow they add load and noise without helping anyone read.
       imageUrl: null,
+      alert: item.alert === true,
+      label: (FEED_LABELS as readonly unknown[]).includes(item.label) ? (item.label as FeedLabel) : undefined,
     });
     if (items.length === MAX_ITEMS) break;
   }
@@ -119,31 +121,88 @@ function useReducedMotion() {
   return reduced;
 }
 
-function Entry({ item, now, hidden }: { item: FeedItem; now: number; hidden: boolean }) {
+function entryWho(item: FeedItem, handle: string | null) {
+  if (item.kind === "tweet") return item.author ?? handle ?? item.source;
+  return item.source || item.author;
+}
+
+const LABEL_TEXT: Record<FeedLabel, string> = {
+  breaking: "Breaking",
+  release: "Release",
+  announcement: "Announcement",
+  research: "Research",
+  event: "Event",
+};
+
+/** The item's kind, from the labelling model (lib/feed-labels.ts). Breaking news takes the warning red. */
+function LabelPill({ label }: { label: FeedLabel }) {
+  return (
+    <span className={cx("shrink-0 rounded-full px-2.5 text-meta font-medium", label === "breaking" ? "bg-down/15 text-down" : "bg-surface-sunk text-text-secondary")}>
+      {LABEL_TEXT[label]}
+    </span>
+  );
+}
+
+/** Who published it, its label when the labelling model is sure of one, and how long ago. */
+function EntryMeta({ item, now }: { item: FeedItem; now: number }) {
   const tweet = item.kind === "tweet";
   const when = age(item.publishedAt, now);
   const handle = item.handle ? `@${item.handle.replace(/^@+/, "")}` : null;
-  const summary = !tweet && item.summary ? lede(item.summary, item.title) : null;
-  const who = tweet ? item.author ?? handle ?? item.source : item.source || item.author;
+  const who = entryWho(item, handle);
   return (
-    <li className={tweet ? "feed-item is-tweet" : "feed-item"} style={hidden ? { visibility: "hidden" } : undefined}>
+    <span className="mb-2 flex items-baseline gap-3 whitespace-nowrap">
+      {who && <span className="min-w-0 truncate text-label font-semibold text-text-secondary" dir="auto">{who}</span>}
+      {tweet && item.author && handle && <span className="min-w-0 truncate text-meta text-text-muted">{handle}</span>}
+      {item.label && <LabelPill label={item.label} />}
+      {when && <time className="ml-auto shrink-0 text-meta text-text-muted" dateTime={new Date(Date.parse(item.publishedAt)).toISOString()}>{when}</time>}
+    </span>
+  );
+}
+
+function Entry({ item, now, hidden }: { item: FeedItem; now: number; hidden: boolean }) {
+  const tweet = item.kind === "tweet";
+  const summary = !tweet && item.summary ? lede(item.summary, item.title) : null;
+  return (
+    <li className={cx("border-b border-rule py-5", hidden && "invisible")}>
       {/* Nobody clicks on a TV, and focus would pull a moving item into view; it stays a link for assistive tech. */}
-      <a className="feed-link" href={linkTarget(item.url)} target="_blank" rel="noopener noreferrer nofollow" tabIndex={-1}>
-        <span className="feed-meta">
-          {who && <span className="feed-source" dir="auto">{who}</span>}
-          {tweet && item.author && handle && <span className="feed-handle">{handle}</span>}
-          {when && <time className="feed-time" dateTime={new Date(Date.parse(item.publishedAt)).toISOString()}>{when}</time>}
-        </span>
-        <span className="feed-title" dir="auto">{shorten(item.title)}</span>
-        {summary && <span className="feed-summary" dir="auto">{summary}</span>}
+      <a className={cx("block", tweet && "border-l-2 border-rule-strong pl-5")} href={linkTarget(item.url)} target="_blank" rel="noopener noreferrer nofollow" tabIndex={-1}>
+        <EntryMeta item={item} now={now} />
+        <span className={cx("wrap-anywhere", tweet ? "line-clamp-7 text-body" : "line-clamp-4 font-narrow text-title font-medium")} dir="auto">{shorten(item.title)}</span>
+        {summary && <span className="mt-2 line-clamp-3 text-body text-text-secondary wrap-anywhere" dir="auto">{summary}</span>}
       </a>
     </li>
   );
 }
 
+/** The server pins alerts for ALERT_MAX_AGE_HOURS (lib/feed-sources.ts); the page holds to the same limit on its own clock. */
+const ALERT_MAX_AGE_MS = 12 * 60 * 60_000;
+const MAX_ALERTS = 2;
+
+function isPinned(item: FeedItem, now: number) {
+  return item.alert === true && now - Date.parse(item.publishedAt) < ALERT_MAX_AGE_MS;
+}
+
+/** A current safety incident on or near campus, held above the scrolling list so nobody has to wait for it to come round. */
+function Alerts({ items, now }: { items: FeedItem[]; now: number }) {
+  return (
+    <ol className="flex shrink-0 flex-col gap-3" aria-label="Campus safety">
+      {items.map((item) => (
+        <li key={item.id} className="border-l-4 border-down bg-down/10 py-3 pr-4 pl-4">
+          <span className="mb-1 flex items-center gap-3 whitespace-nowrap">
+            <span aria-hidden="true" className="size-2.5 shrink-0 animate-ember-pulse rounded-full bg-down" />
+            <span className="min-w-0 truncate text-label font-semibold text-text-secondary" dir="auto">{item.source}</span>
+            <time className="ml-auto shrink-0 text-meta text-text-muted" dateTime={new Date(Date.parse(item.publishedAt)).toISOString()}>{age(item.publishedAt, now)}</time>
+          </span>
+          <span className="line-clamp-3 font-narrow text-title font-semibold wrap-anywhere" dir="auto">{shorten(item.title)}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 /** The longest name that still fits the column at each size of the note's headline. */
-const NOTE_NAME_SIZES: readonly [number, number][] = [[11, 76], [16, 60], [24, 48]];
-const NOTE_NAME_MIN_PX = 40;
+const NOTE_NAME_SIZES: readonly [number, string][] = [[10, "text-feature"], [16, "text-headline"]];
+const NOTE_NAME_SMALLEST = "text-subhead";
 
 /**
  * The note on a newsworthy token: what happened, and which outlets reported it. The summary is written by a
@@ -151,22 +210,30 @@ const NOTE_NAME_MIN_PX = 40;
  */
 function Note({ story, on, now }: { story: Story; on: boolean; now: number }) {
   const { name, symbol } = story.asset;
-  const size = NOTE_NAME_SIZES.find(([chars]) => name.length <= chars)?.[1] ?? NOTE_NAME_MIN_PX;
+  const size = NOTE_NAME_SIZES.find(([chars]) => name.length <= chars)?.[1] ?? NOTE_NAME_SMALLEST;
   const when = age(story.newestAt, now);
   return (
-    <article className={on ? `${styles.story} ${styles.on}` : styles.story} aria-label={`${name} in the news`} aria-hidden={!on}>
-      <p className={styles.kicker}><span className={styles.dot} aria-hidden="true" />In the news</p>
-      <h2 className={styles.name} style={{ "--name-size": `${size}px` } as CSSProperties} dir="auto">{name}</h2>
-      <p className={styles.symbol}>{symbol}</p>
-      <p className={styles.summary} dir="auto">{story.summary}</p>
-      <div className={styles.foot}>
-        {story.outlets.length > 0 && (
-          <p className={styles.outlets}><span className={styles.label}>Reported by</span>{story.outlets.join(", ")}</p>
-        )}
-        <p className={styles.credit}>AI summary{when ? ` · latest report ${when}` : ""}</p>
+    <article className={cx(FADE_LAYER, "flex flex-col p-7 starting:opacity-0", !on && AWAY)} aria-label={`${name} in the news`} aria-hidden={!on}>
+      <div className="flex items-center gap-4">
+        <Shard className="animate-ember-pulse" />
+        {showsSymbol(story.asset) && <span className="text-title font-medium text-text-muted">{symbol}</span>}
+      </div>
+      <h2 className={cx("mt-4 font-narrow font-semibold wrap-anywhere", size)} dir="auto">{name}</h2>
+      <p className="mt-7 border-t border-rule pt-7 text-title text-pretty" dir="auto">{story.summary}</p>
+      <div className="mt-auto flex flex-col gap-1">
+        {story.outlets.length > 0 && <p className="text-body text-text-secondary">Reported by {story.outlets.join(", ")}</p>}
+        <p className="text-meta text-text-muted">AI summary{when ? `, latest report ${when}` : ""}</p>
       </div>
     </article>
   );
+}
+
+const FADE_LAYER = "absolute inset-0 transition-[opacity,visibility] duration-500 ease-out-soft";
+const AWAY = "invisible opacity-0";
+
+function feedNoteText(note: Note) {
+  if (note === "loading") return "Loading news…";
+  return note === "error" ? "News unavailable" : "No news right now";
 }
 
 /**
@@ -175,7 +242,7 @@ function Note({ story, on, now }: { story: Story; on: boolean; now: number }) {
  * While a newsworthy token is in the featured slot (see MarketsProvider) its note covers the list, and the
  * list stops moving underneath, so it carries on from the same place when the note goes.
  *
- * The track holds two copies of the list, the second drawn above the first (see .feed-track in globals.css).
+ * The track holds two copies of the list, the second drawn above the first (flex-col-reverse while scrolling).
  * It slides down by the height of the second, which leaves the second exactly where the first began; the
  * first is then dropped and a fresh copy added above. A new list from a poll goes into that fresh copy, which
  * is out of sight when it is added, so the content changes without a jump. A list short enough to fit is
@@ -183,6 +250,7 @@ function Note({ story, on, now }: { story: Story; on: boolean; now: number }) {
  */
 export function Feed() {
   const [halves, setHalves] = useState<Half[]>([]);
+  const [alerts, setAlerts] = useState<FeedItem[]>([]);
   const [note, setNote] = useState<Note>("loading");
   const [now, setNow] = useState(() => Date.now());
   const [paging, setPaging] = useState<{ pages: Page[]; index: number }>({ pages: [], index: 0 });
@@ -240,7 +308,10 @@ export function Feed() {
         if (!response.ok) throw new Error("Feed request failed");
         const body = (await response.json()) as Partial<FeedResponse> | null;
         if (!alive) return;
-        const items = clean(body?.items);
+        const all = clean(body?.items);
+        const pinned = all.filter((item) => isPinned(item, Date.now())).slice(0, MAX_ALERTS);
+        const items = all.filter((item) => !pinned.includes(item));
+        setAlerts((current) => (current.map((item) => item.id).join() === pinned.map((item) => item.id).join() ? current : pinned));
         if (items.length) { lastGood = performance.now(); receive(items); }
         else failure = body?.status === "error" ? "error" : "empty";
       } catch {
@@ -364,16 +435,15 @@ export function Feed() {
   }, [pageCount]);
 
   const page = pageCount ? paging.pages[Math.min(paging.index, pageCount - 1)] : null;
+  const scrolling = halves.length > 1;
   const list = !halves.length ? (
-    <section className="feed" aria-label="News and posts">
-      <p className="feed-note">{note === "loading" ? "Loading news…" : note === "error" ? "News unavailable" : "No news right now"}</p>
-    </section>
+    <EmptyNote>{feedNoteText(note)}</EmptyNote>
   ) : (
-    <section className={`feed ${halves.length > 1 ? "is-scrolling" : ""}`} aria-label="News and posts">
-      <div ref={viewport} className="feed-viewport">
-        <div ref={track} className="feed-track" style={page ? { transform: `translate3d(0, ${-page.top}px, 0)` } : undefined}>
+    <section className="flex size-full flex-col" aria-label="News and posts">
+      <div ref={viewport} className={cx("min-h-0 flex-1 overflow-clip", scrolling && "fade-y")}>
+        <div ref={track} className={cx("relative will-change-transform", scrolling && "flex flex-col-reverse")} style={page ? { transform: `translate3d(0, ${-page.top}px, 0)` } : undefined}>
           {halves.map((half, at) => (
-            <ol key={half.key} className="feed-group" aria-hidden={at > 0}>
+            <ol key={half.key} className="animate-fade-in" aria-hidden={at > 0}>
               {half.items.map((item, i) => (
                 <Entry key={item.id} item={item} now={now} hidden={page !== null && (i < page.from || i > page.to)} />
               ))}
@@ -384,10 +454,14 @@ export function Feed() {
     </section>
   );
 
+  const shownAlerts = alerts.filter((item) => isPinned(item, now));
   return (
-    <div className={styles.column}>
-      <div className={covered ? `${styles.layer} ${styles.away}` : styles.layer} aria-hidden={covered || undefined}>{list}</div>
-      {noted && <Note story={noted} on={covered} now={now} />}
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      {shownAlerts.length > 0 && <Alerts items={shownAlerts} now={now} />}
+      <Panel className="flex-1">
+        <div className={cx(FADE_LAYER, covered && AWAY)} aria-hidden={covered || undefined}>{list}</div>
+        {noted && <Note story={noted} on={covered} now={now} />}
+      </Panel>
     </div>
   );
 }

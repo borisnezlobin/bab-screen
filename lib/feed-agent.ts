@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { MAX_ITEMS, MIN_AGENT_PICKS, TARGET_ITEMS } from "./feed-sources";
+import { ALERT_MAX_AGE_HOURS, MAX_ITEMS, MIN_AGENT_PICKS, TARGET_ITEMS } from "./feed-sources";
 import { RELATED, storyMatcher, tidy } from "./feed-parse";
 import type { FeedAgentName, FeedItem } from "./feed-types";
 
@@ -38,15 +38,19 @@ export const AGENT_TIMEOUT_MS = 90_000;
 const CLI_MAX_OUTPUT_BYTES = 256 * 1024;
 const PROMPT_TITLE_MAX = 240;
 
-/** Topic groups the model sorts its picks into, in display rotation order, with the most taken from each. */
+/**
+ * Topic groups the model sorts its picks into, in display rotation order, with the most taken from each.
+ * Picks in `alerts` are also pinned above the scrolling feed (lib/feed.ts, app/Feed.tsx).
+ */
 const GROUPS = [
-  { key: "policy", max: 4, hint: "regulation, legislation, courts, enforcement, government" },
+  { key: "alerts", max: 2, hint: `a threat to people's safety on the UC Berkeley campus or in the neighbourhoods right around it, reported in the last ${ALERT_MAX_AGE_HOURS} hours. Those neighbourhoods include Southside and Telegraph Avenue, Northside, downtown Berkeley, Clark Kerr, Elmwood, and the hills above campus: Panoramic Hill, Panoramic Way and Claremont, which have Oakland addresses but sit directly above the campus. Count a shooting or active threat, an armed suspect, a violent crime, police activity with an area to avoid or a shelter-in-place, an evacuation, a fire, or a campus closure. Include a shooting or violent crime there even when police say there is no ongoing threat. Not traffic collisions or road closures, not crime elsewhere in the Bay Area, and never an anniversary, a trial or a policy story` },
+  { key: "ai_tech", max: 6, hint: "new AI models and releases (frontier labs and open-weight models), AI research results, developer platforms and tools (for example a launch from Cloudflare, GitHub, Google or Hugging Face), notable software launches, and serious vulnerabilities" },
   { key: "protocols", max: 4, hint: "protocol upgrades, launches, research, developer news, DeFi" },
-  { key: "posts", max: 5, hint: "candidates of kind \"post\" worth reading: an insight, an announcement or a finding, not promotion or chatter" },
-  { key: "security", max: 3, hint: "hacks, exploits, incidents, fraud" },
-  { key: "markets", max: 4, hint: "companies, institutions, funding, adoption, market structure" },
-  { key: "ai_tech", max: 4, hint: "AI and the wider technology industry" },
-  { key: "campus", max: 2, hint: "UC Berkeley and the club" },
+  { key: "posts", max: 4, hint: "candidates of kind \"post\" worth reading: an insight, an announcement or a finding, not promotion or chatter" },
+  { key: "security", max: 3, hint: "crypto and software hacks, exploits, breaches and fraud" },
+  { key: "policy", max: 3, hint: "crypto and AI regulation, legislation, courts and enforcement" },
+  { key: "markets", max: 3, hint: "companies, institutions, funding, adoption, market structure" },
+  { key: "campus", max: 2, hint: "UC Berkeley news a student in a technical club would act on or talk about: campus operations and announcements, EECS and computing research, Berkeley startups, and the club itself. Not research from unrelated fields" },
 ] as const;
 
 const PICKS_SCHEMA = {
@@ -56,16 +60,16 @@ const PICKS_SCHEMA = {
   additionalProperties: false,
 };
 
-const SYSTEM_PROMPT = `You choose what appears on a large wall display in the clubroom of Blockchain at Berkeley, a student blockchain club at UC Berkeley. Students, visitors, faculty and sponsors all see this screen.
+const SYSTEM_PROMPT = `You choose what appears on a large wall display in the clubroom of Blockchain at Berkeley, a student blockchain club at UC Berkeley. Students, visitors, faculty and sponsors all see this screen. The members build things: they follow crypto, AI and software closely, and they want the developments they would bring up with each other, such as a new model release, a platform launch, a protocol upgrade or a major exploit.
 
 You will be given a numbered list of candidate items: news headlines and short social posts collected automatically from RSS feeds and social networks. Choose about ${TARGET_ITEMS} stories and sort them into these groups, the most important first within each group:
 ${GROUPS.map((group) => `- ${group.key} (up to ${group.max} stories): ${group.hint}`).join("\n")}
 
 Several candidates are often about the same event, company announcement or incident, worded differently by different outlets. Such candidates are one story. Write each story as a list of numbers: first the one candidate to show (the clearest, most informative version), then every other candidate about that same event. Only the first number of each story is displayed, so an event appears on the screen once. A story with no other coverage is a list of one number. A number appears in at most one story, and a story in exactly one group. A group may be empty when nothing in the list deserves it.
 
-Favour substantive, informative items. A note such as "4 outlets" means that many sources reported the story, which is a sign that it matters. Prefer recent items.
+Favour substantive, informative items about technology, AI, crypto and the campus. A note such as "4 outlets" means that many sources reported the story, which is a sign that it matters. Prefer recent items. Leave a group empty rather than fill it with a story the members would not care about.
 
-Leave out: clickbait, price predictions and routine price-movement filler, daily roundups and newsletter digests, token shilling, giveaways, airdrop farming, product promotion, fundraising appeals and event plugs, anything that reads like an advert, a press release or a scam, partisan political fights, violence and tragedy unrelated to technology or markets, gadget reviews and general-interest stories with no link to technology, markets or the campus, crude or offensive language, sexual content, personal chatter that carries no information, and anything that would be embarrassing on a public screen at a university.
+Leave out: clickbait, price predictions and routine price-movement filler, daily roundups and newsletter digests, token shilling, giveaways, airdrop farming, product promotion, fundraising appeals and event plugs, anything that reads like an advert, a press release or a scam, partisan political fights, violence and tragedy unrelated to technology or markets (except a current safety incident on or near the UC Berkeley campus, which goes in alerts), gadget reviews, and general-interest stories with no link to technology or markets, including campus research from unrelated fields such as ecology, medicine or the humanities, crude or offensive language, sexual content, personal chatter that carries no information, and anything that would be embarrassing on a public screen at a university. A post on an AI lab's, platform's or protocol's own blog that announces a new model, capability, research result or upgrade is news, not promotion.
 
 Rotation: an item marked "shown" was on the screen recently, and its story counts as shown. The display should keep changing, so prefer unshown stories. Keep a shown story only while it is still one of the major stories of the day, or when there is not enough good unshown material.
 
@@ -77,7 +81,12 @@ Answer with candidate numbers only.`;
 export type AgentJob = { system: string; prompt: string; schema: Record<string, unknown> };
 
 export type AgentAttempt = { agent: FeedAgentName; model: string; ms: number; ok: boolean; error: string | null };
-export type AgentOutcome = { ids: string[]; agent: FeedAgentName; model: string; ms: number; attempts: AgentAttempt[] };
+/** The ids to display, in order, and those of them the model put in the `alerts` group. */
+export type Picks = { ids: string[]; alerts: string[] };
+export type AgentOutcome = Picks & { agent: FeedAgentName; model: string; ms: number; attempts: AgentAttempt[] };
+
+type CliResult = { is_error?: boolean; structured_output?: unknown; result?: unknown };
+type ApiMessage = { stop_reason?: string; content?: Array<{ type?: string; text?: string }> };
 
 export class AgentError extends Error {
   constructor(
@@ -136,33 +145,35 @@ export function buildPrompt(candidates: FeedItem[], history: string[][], now: nu
  * stories from each group in turn so the column alternates between topics. Numbers that match
  * nothing, numbers already used by another story and overlong groups are dropped.
  */
-export function picksToIds(value: unknown, candidates: FeedItem[]): string[] {
+export function picksToIds(value: unknown, candidates: FeedItem[]): Picks {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AgentError("invalid_output");
-  const valid = (pick: unknown): pick is number => typeof pick === "number" && Number.isInteger(pick) && pick >= 1 && pick <= candidates.length;
-  const groups: number[][] = [];
   const used = new Set<number>();
-  for (const group of GROUPS) {
-    const stories = (value as Record<string, unknown>)[group.key];
-    if (!Array.isArray(stories)) throw new AgentError("invalid_output");
-    const leads: number[] = [];
-    for (const story of stories.slice(0, 50)) {
-      // A bare number is accepted as a story of one.
-      const members = (Array.isArray(story) ? story.slice(0, 50) : [story]).filter(valid);
-      const lead = members.find((member) => !used.has(member));
-      // Every member is spent, shown or not, so the same event cannot come back in another story.
-      const repeat = members.some((member) => used.has(member));
-      for (const member of members) used.add(member);
-      if (lead !== undefined && !repeat && leads.length < group.max) leads.push(lead);
-    }
-    groups.push(leads);
-  }
+  const groups = GROUPS.map((group) => groupLeads((value as Record<string, unknown>)[group.key], group.max, candidates.length, used));
   const ids: string[] = [];
   for (let round = 0; ids.length < MAX_ITEMS && groups.some((group) => group.length > round); round += 1) {
     for (const group of groups) {
       if (group[round] !== undefined && ids.length < MAX_ITEMS) ids.push(candidates[group[round] - 1].id);
     }
   }
-  return ids;
+  const alertGroup = groups[GROUPS.findIndex((group) => group.key === "alerts")];
+  return { ids, alerts: alertGroup.map((number) => candidates[number - 1].id) };
+}
+
+/** The candidate number to show for each story in one group, spending every member so no event comes back. */
+function groupLeads(stories: unknown, max: number, count: number, used: Set<number>): number[] {
+  if (!Array.isArray(stories)) throw new AgentError("invalid_output");
+  const valid = (pick: unknown): pick is number => typeof pick === "number" && Number.isInteger(pick) && pick >= 1 && pick <= count;
+  const leads: number[] = [];
+  for (const story of stories.slice(0, 50)) {
+    // A bare number is accepted as a story of one.
+    const members = (Array.isArray(story) ? story.slice(0, 50) : [story]).filter(valid);
+    const lead = members.find((member) => !used.has(member));
+    // Every member is spent, shown or not, so the same event cannot come back in another story.
+    const repeat = members.some((member) => used.has(member));
+    for (const member of members) used.add(member);
+    if (lead !== undefined && !repeat && leads.length < max) leads.push(lead);
+  }
+  return leads;
 }
 
 async function askApi(model: string, job: AgentJob, signal: AbortSignal): Promise<unknown> {
@@ -184,7 +195,7 @@ async function askApi(model: string, job: AgentJob, signal: AbortSignal): Promis
     }),
   });
   if (!response.ok) throw new AgentError(`api_http_${response.status}`);
-  const message = (await response.json()) as { stop_reason?: string; content?: { type?: string; text?: string }[] };
+  const message = (await response.json()) as ApiMessage;
   if (message.stop_reason !== "end_turn") throw new AgentError(`api_stop_${message.stop_reason ?? "unknown"}`);
   const block = message.content?.find((entry) => entry.type === "text" && typeof entry.text === "string");
   if (!block?.text) throw new AgentError("invalid_output");
@@ -218,17 +229,17 @@ function runCli(file: string, args: string[], options: { cwd: string; input: str
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, { cwd: options.cwd, stdio: ["pipe", "pipe", "ignore"], env: cliEnv(options.env) });
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = { id: undefined as ReturnType<typeof setTimeout> | undefined };
     const chunks: Buffer[] = [];
     let size = 0;
     const fail = (code: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(timeout.id);
       child.kill("SIGKILL");
       reject(new AgentError(code));
     };
-    timer = setTimeout(() => fail("cli_timeout"), options.timeoutMs);
+    timeout.id = setTimeout(() => fail("cli_timeout"), options.timeoutMs);
     child.on("error", (error: NodeJS.ErrnoException) => fail(error.code === "ENOENT" ? "cli_not_found" : "cli_spawn_failed"));
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
@@ -238,7 +249,7 @@ function runCli(file: string, args: string[], options: { cwd: string; input: str
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(timeout.id);
       resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") });
     });
     child.stdin.on("error", () => undefined); // EPIPE if the CLI exits early; "close" reports it
@@ -271,7 +282,7 @@ async function askClaudeCli(model: string, job: AgentJob, timeoutMs: number): Pr
       env: { MAX_THINKING_TOKENS: "0" },
     },
   );
-  let result: { is_error?: boolean; structured_output?: unknown; result?: unknown };
+  let result: CliResult;
   try {
     result = JSON.parse(stdout);
   } catch {
@@ -364,9 +375,10 @@ export function spread(items: FeedItem[]): FeedItem[] {
 }
 
 /** Checks one agent's answer and turns it into the ids to display, in order. */
-function selection(output: unknown, candidates: FeedItem[]): string[] {
+function selection(output: unknown, candidates: FeedItem[]): Picks {
   const byId = new Map(candidates.map((item) => [item.id, item]));
-  const picked = picksToIds(output, candidates).map((id) => byId.get(id) as FeedItem);
+  const picks = picksToIds(output, candidates);
+  const picked = picks.ids.map((id) => byId.get(id) as FeedItem);
   // The model is asked for one item per story; make sure of it here, keeping its order: no two
   // picks on what looks like the same subject, and one post per account.
   const related = storyMatcher(candidates, RELATED);
@@ -376,7 +388,8 @@ function selection(output: unknown, candidates: FeedItem[]): string[] {
     if (!repeat) unique.push(item);
   }
   if (unique.length < Math.min(MIN_AGENT_PICKS, candidates.length)) throw new AgentError("too_few_picks");
-  return spread(unique).map((item) => item.id);
+  const ids = spread(unique).map((item) => item.id);
+  return { ids, alerts: picks.alerts.filter((id) => ids.includes(id)) };
 }
 
 /**
@@ -410,8 +423,8 @@ export async function runAgents<T>(job: AgentJob, check: (output: unknown) => T)
  */
 export async function pickWithAgent(candidates: FeedItem[], history: string[][], now: number, outlets?: Map<string, number>): Promise<AgentOutcome> {
   const job = { system: SYSTEM_PROMPT, prompt: buildPrompt(candidates, history, now, outlets), schema: PICKS_SCHEMA };
-  const { value: ids, agent, model, ms, attempts } = await runAgents(job, (output) => selection(output, candidates));
-  return { ids, agent, model, ms, attempts };
+  const { value, agent, model, ms, attempts } = await runAgents(job, (output) => selection(output, candidates));
+  return { ...value, agent, model, ms, attempts };
 }
 
 /**
@@ -426,8 +439,12 @@ export function fallbackOrder(candidates: FeedItem[], history: string[][], targe
     if (group) group.push(item);
     else groups.set(item.source, [item]);
   }
-  const rank = (item: FeedItem) => (shown.has(item.id) ? 1 : 0);
-  const newer = (a: FeedItem, b: FeedItem) => rank(a) - rank(b) || Date.parse(b.publishedAt) - Date.parse(a.publishedAt);
+  const rank = (item: FeedItem) => {
+    return shown.has(item.id) ? 1 : 0;
+  };
+  const newer = (a: FeedItem, b: FeedItem) => {
+    return rank(a) - rank(b) || Date.parse(b.publishedAt) - Date.parse(a.publishedAt);
+  };
   const queues = [...groups.values()].map((group) => group.sort(newer)).sort((a, b) => newer(a[0], b[0]));
   const deepest = Math.max(0, ...queues.map((queue) => queue.length));
   const ids: string[] = [];

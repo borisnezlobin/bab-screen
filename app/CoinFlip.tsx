@@ -4,10 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CoinFlipView } from "../lib/coin-flip";
 import type { JamQr } from "../lib/jam";
 import { CoinToss } from "./CoinToss";
-import styles from "./CoinFlip.module.css";
+import { Panel, Shard, cx } from "./ui";
 
 const POLL_MS = 2_000;
-const QR_BOX_PX = 259;
+const QR_BOX_PX = 220;
 const RECEIPT_BOX_PX = 250;
 /** How long the receipt QR stays up once the payout has landed, and the longest the stage is held waiting for it. */
 const RECEIPT_MS = 20_000;
@@ -29,20 +29,57 @@ const clock = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor(ms
 function Qr({ qr, box, label }: { qr: JamQr; box: number; label: string }) {
   const side = Math.max(1, Math.floor(box / qr.modules)) * qr.modules;
   return (
-    <svg viewBox={`0 0 ${qr.modules} ${qr.modules}`} width={side} height={side} shapeRendering="crispEdges" role="img" aria-label={label}>
+    <svg viewBox={`0 0 ${qr.modules} ${qr.modules}`} width={side} height={side} className="block fill-ink" shapeRendering="crispEdges" role="img" aria-label={label}>
       <path d={qr.path} />
     </svg>
   );
 }
 
+function SideBadge({ side }: { side: "heads" | "tails" }) {
+  if (side === "tails") return <span className="grid size-11 place-items-center rounded-full bg-accent-glow text-title font-bold text-ink">$</span>;
+  return <span className="grid size-11 place-items-center rounded-full bg-accent-glow"><span className="bab-mark size-7 bg-ink" /></span>;
+}
+
 function Player({ game, side, landed }: { game: Game; side: "heads" | "tails"; landed: boolean }) {
-  const state = !landed ? "" : game.winner === side ? styles.won : styles.lost;
+  const won = landed && game.winner === side;
   return (
-    <div className={`${styles.player} ${state}`}>
-      <p className={styles.side}><span className={side === "heads" ? styles.mark : styles.dollar}>{side === "heads" ? "" : "$"}</span>{side}</p>
-      <p className={styles.address}>{short(game[side])}</p>
-      <p className={styles.tag}>{landed && game.winner === side ? "Winner" : ""}</p>
+    <div className={cx("flex flex-col items-center gap-3 text-center transition-opacity duration-500", landed && !won && "opacity-30")}>
+      <p className="flex items-center gap-3.5 text-title font-medium text-text-secondary"><SideBadge side={side} />{side === "heads" ? "Heads" : "Tails"}</p>
+      <p className="text-feature font-semibold">{short(game[side])}</p>
+      <p className="flex h-10 items-center gap-3 text-title font-semibold text-accent-text">{won && <><Shard className="animate-ember-pulse" />Winner</>}</p>
     </div>
+  );
+}
+
+function payoutLine(game: Game, pot: string, landed: boolean, paid: boolean) {
+  if (!landed) return "";
+  return paid ? `${pot} sent to ${short(game[game.winner])}` : `Sending ${pot} to ${short(game[game.winner])}`;
+}
+
+function receiptFor(game: Game | null, view: Ok | null, landed: boolean) {
+  if (!game || !landed) return null;
+  if (game.id.startsWith("demo")) return view?.qr ?? null;
+  return view?.game?.id === game.id ? view.game.payout?.qr ?? null : null;
+}
+
+function WalletTile({ view }: { view: Ok }) {
+  return (
+    <Panel aria-label="Coin flip" className="flex shrink-0 gap-5 border-t border-rule pt-5">
+      <div className="grid size-55 shrink-0 place-items-center rounded-inner bg-paper"><Qr qr={view.qr} box={QR_BOX_PX} label="QR code of the coin flip wallet address" /></div>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <p className="font-narrow text-title font-semibold">Flip a coin for USDC</p>
+        {!view.waiting && <p className="text-body text-text-secondary">Send {money(view.minUsd)} or more on {view.network}. The next person to match it plays you.</p>}
+        {view.waiting ? (
+          <div className="mt-auto">
+            <p className="text-headline font-semibold text-accent-text">{money(view.waiting.usd)}</p>
+            <p className="text-body text-text-secondary">Match it to play</p>
+            <p className="text-meta text-text-muted">From {short(view.waiting.from)}, {clock(view.waiting.remainingMs)} left</p>
+          </div>
+        ) : (
+          <p className="mt-auto text-meta text-text-muted">{view.problem ? "Not watching for deposits right now" : "Waiting for the first stake"}</p>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -84,7 +121,7 @@ export function CoinFlip() {
 
   const gameId = game?.id;
   const landed = phase !== "flip";
-  const receipt = !game || !landed ? null : game.id.startsWith("demo") ? view?.qr ?? null : view?.game?.id === game.id ? view.game.payout?.qr ?? null : null;
+  const receipt = receiptFor(game, view, landed);
   const paid = !!receipt;
 
   useEffect(() => {
@@ -116,39 +153,21 @@ export function CoinFlip() {
 
   return (
     <>
-      {view && (
-        <section className={styles.tile} aria-label="Coin flip">
-          <div className={styles.qr}><Qr qr={view.qr} box={QR_BOX_PX} label="QR code of the coin flip wallet address" /></div>
-          <div className={styles.body}>
-            <p className={styles.title}>Want to gamble?</p>
-            <p className={styles.rules}>Gamble on a coin flip</p>
-            {!view.waiting && <p className={styles.fine}>Send USDC on {view.network}, {money(view.minUsd)} or more</p>}
-            {view.waiting ? (
-              <div className={styles.status}>
-                <p className={styles.stake}>{money(view.waiting.usd)}</p>
-                <p className={styles.rules}>Match to play</p>
-                <p className={styles.fine}>{short(view.waiting.from)} · {clock(view.waiting.remainingMs)}</p>
-              </div>
-            ) : (
-              <p className={`${styles.status} ${styles.fine}`}>{view.problem ? "Not watching for deposits right now" : "Waiting for the first stake"}</p>
-            )}
-          </div>
-        </section>
-      )}
+      {view && <WalletTile view={view} />}
       {game && (
-        <div key={game.id} className={`${styles.overlay} ${landed ? styles.landed : ""} ${phase === "leaving" ? styles.leaving : ""}`} role="status">
-          <p className={styles.kicker}>Coin flip · {money(game.stakeUsd)} each</p>
-          <div className={styles.table}>
+        <div key={game.id} role="status" className={cx("fixed inset-0 z-50 grid animate-fade-in grid-rows-[auto_minmax(0,1fr)_auto_auto] items-center justify-items-center overflow-hidden bg-canvas p-24 transition-opacity duration-500", phase === "leaving" && "opacity-0")}>
+          <p className="text-subhead font-medium text-text-secondary">Coin flip for {pot}</p>
+          <div className="grid w-full grid-cols-[minmax(0,1fr)_700px_minmax(0,1fr)] items-center">
             <Player game={game} side="heads" landed={landed} />
-            <div className={styles.toss}><CoinToss winner={game.winner} onToss={toss} onLand={land} /></div>
+            <div className="relative z-10 size-75 justify-self-center"><CoinToss winner={game.winner} onToss={toss} onLand={land} /></div>
             <Player game={game} side="tails" landed={landed} />
           </div>
-          <p className={styles.result}>{landed ? `${game.winner === "heads" ? "Heads" : "Tails"} wins ${pot}` : ""}</p>
-          <p className={styles.payout}>{!landed ? "" : paid ? `${pot} sent to ${short(game[game.winner])}` : `Sending ${pot} to ${short(game[game.winner])}`}</p>
+          <p className="min-h-26 font-narrow text-display font-bold">{landed ? <span className="inline-block animate-rise-in">{game.winner === "heads" ? "Heads" : "Tails"} wins {pot}</span> : ""}</p>
+          <p className="mt-4 h-10 text-title text-text-secondary">{payoutLine(game, pot, landed, paid)}</p>
           {receipt && (
-            <div className={styles.receipt}>
+            <div className="absolute right-24 bottom-24 z-20 grid animate-fade-in justify-items-center gap-3 text-body text-text-secondary">
               <p>Scan for the transaction</p>
-              <div className={styles.receiptQr}><Qr qr={receipt} box={RECEIPT_BOX_PX} label="QR code of the payout transaction on the block explorer" /></div>
+              <div className="grid size-62.5 place-items-center rounded-inner bg-paper"><Qr qr={receipt} box={RECEIPT_BOX_PX} label="QR code of the payout transaction on the block explorer" /></div>
             </div>
           )}
         </div>

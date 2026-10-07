@@ -208,40 +208,37 @@ const LINK = /https?:|www\.|[\p{L}\p{N}-]+\.[a-z]{2,}(?![\p{L}\p{N}])/iu;
 const HANDLE = /(^|[^\p{L}\p{N}])[@#][\p{L}\p{N}_]/u;
 /** Names that look like a web address and are not one. Dotted token names are added to these. */
 const DOTTED_NAMES = ["Crypto.com", "Fetch.ai", "Pump.fun", "ether.fi", "Lido.fi", "U.S"];
-const NOT_PLAIN = /[^\p{Script=Latin}\p{N} .,;:'’"“”()%$&/+–—!?-]/gu;
-const SENTENCE_END = /(?<=[.!?]["”’)]?)\s+(?=["“‘(]?[\p{Lu}\p{N}$])/u;
+const NOT_PLAIN = /[^\p{Script=Latin}\p{N} .,;:'’"""()%$&/+–—!?-]/gu;
+const SENTENCE_END = /(?<=[.!?][""’)]?)\s+(?=[""‘(]?[\p{Lu}\p{N}$])/u;
 const NUMBER = /\d[\d,]*(?:\.\d+)?/g;
 const OTHER_SCRIPT = /(?!\p{Script=Latin})\p{L}/u;
 
 const figure = (text: string) => text.replace(/,/g, "").replace(/\.0+$/, "");
 
-/**
- * The model's note, reduced to what may go on the screen, or null if nothing usable is left.
- * `grounds` is the text of the candidates it cites; `names` are dotted names that are allowed.
- */
-export function cleanSummary(raw: unknown, grounds: string, names: string[] = []): string | null {
-  if (typeof raw !== "string") return null;
-  const allowed = [...DOTTED_NAMES, ...names.filter((name) => name.includes("."))];
-  const hide = (text: string) => allowed.reduce((out, name) => out.replace(new RegExp(escapeRegExp(name), "gi"), (hit) => hit.replace(/\./g, "\u0001")), text);
-  const facts = grounds.replace(/,/g, "");
-  const text = tidy(raw.slice(0, 4000))
-    // Markup is unwrapped rather than deleted, so an address inside it is still seen below.
-    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
-    .replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, "$1 $2");
-  const kept: string[] = [];
-  for (const part of text.split(SENTENCE_END)) {
-    const sentence = part.trim();
-    if (!sentence) continue;
-    if (LINK.test(hide(sentence)) || HANDLE.test(sentence) || OTHER_SCRIPT.test(sentence)) continue;
-    if (rejectReason({ title: sentence, url: "https://example.invalid/", kind: "news" })) continue;
-    const invented = (sentence.match(NUMBER) ?? []).some((number) => !new RegExp(`(?<![\\d.])${escapeRegExp(figure(number))}(?!\\d|\\.\\d)`).test(facts));
-    if (invented) continue;
-    const plain = sentence.replace(NOT_PLAIN, " ").replace(/\s+/g, " ").replace(/\s+([.,;:!?])/g, "$1").trim();
-    // A sentence is a statement: it has several words and it ends.
-    if (plain.split(" ").length < 4) continue;
-    const whole = /[.!?]["”’)]?$/.test(plain) ? plain : `${plain}.`;
-    if (!kept.includes(whole)) kept.push(whole);
-  }
+const SENTENCE_ENDING = /[.!?][""’)]?$/;
+
+function hasInventedFigure(sentence: string, facts: string): boolean {
+  const numbers = sentence.match(NUMBER) ?? [];
+  return numbers.some((num) => !new RegExp(`(?<![\\d.])${escapeRegExp(figure(num))}(?!\\d|\\.\\d)`).test(facts));
+}
+
+function isAcceptableSentence(sentence: string, hide: (s: string) => string, facts: string): boolean {
+  if (LINK.test(hide(sentence)) || HANDLE.test(sentence) || OTHER_SCRIPT.test(sentence)) return false;
+  if (rejectReason({ title: sentence, url: "https://example.invalid/", kind: "news" })) return false;
+  if (hasInventedFigure(sentence, facts)) return false;
+  return true;
+}
+
+function toPlainSentence(sentence: string): string | null {
+  const plain = sentence.replace(NOT_PLAIN, " ").replace(/\s+/g, " ").replace(/\s+([.,;:!?])/g, "$1").trim();
+  return plain.split(" ").length >= 4 ? plain : null;
+}
+
+function normalizeSentence(plain: string): string {
+  return SENTENCE_ENDING.test(plain) ? plain : `${plain}.`;
+}
+
+function assembleSummary(kept: string[]): string {
   let summary = "";
   for (const sentence of kept) {
     const next = summary ? `${summary} ${sentence}` : sentence;
@@ -250,7 +247,45 @@ export function cleanSummary(raw: unknown, grounds: string, names: string[] = []
   }
   // A first sentence too long to show whole is cut at a word.
   if (!summary && kept.length) summary = clip(kept[0], SUMMARY_MAX_CHARS);
+  return summary;
+}
+
+/**
+ * The model’s note, reduced to what may go on the screen, or null if nothing usable is left.
+ * `grounds` is the text of the candidates it cites; `names` are dotted names that are allowed.
+ */
+export function cleanSummary(raw: unknown, grounds: string, names: string[] = []): string | null {
+  if (typeof raw !== "string") return null;
+  const allowed = [...DOTTED_NAMES, ...names.filter((name) => name.includes("."))];
+  const hide = (t: string) => allowed.reduce((out, name) => out.replace(new RegExp(escapeRegExp(name), "gi"), (hit) => hit.replace(/\./g, "\u0001")), t);
+  const facts = grounds.replace(/,/g, "");
+  // Markup is unwrapped rather than deleted, so an address inside it is still seen below.
+  const text = tidy(raw.slice(0, 4000))
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
+    .replace(/!?\[([^\]]*)\]\(([^)]*)\)/g, "$1 $2");
+  const kept: string[] = [];
+  for (const part of text.split(SENTENCE_END)) {
+    const sentence = part.trim();
+    if (!sentence || !isAcceptableSentence(sentence, hide, facts)) continue;
+    const plain = toPlainSentence(sentence);
+    if (!plain) continue;
+    const whole = normalizeSentence(plain);
+    if (!kept.includes(whole)) kept.push(whole);
+  }
+  const summary = assembleSummary(kept);
   return summary.length >= SUMMARY_MIN_CHARS ? summary : null;
+}
+
+function parseNewsworthyEntries(output: unknown): unknown[] | null {
+  const tokens = typeof output === "object" && output !== null ? (output as { tokens?: unknown }).tokens : null;
+  return Array.isArray(tokens) ? tokens : null;
+}
+
+function parseEntryRaw(entry: unknown): { symbol: string; sources: unknown; summary: unknown } | null {
+  if (typeof entry !== "object" || entry === null) return null;
+  const raw = entry as { symbol?: unknown; sources?: unknown; summary?: unknown };
+  const symbolRaw = typeof raw.symbol === "string" ? raw.symbol.trim().replace(/^\$/, "").toUpperCase() : "";
+  return symbolRaw ? { symbol: symbolRaw, sources: raw.sources, summary: raw.summary } : null;
 }
 
 /**
@@ -258,29 +293,30 @@ export function cleanSummary(raw: unknown, grounds: string, names: string[] = []
  * an entry that fails a check is dropped and noted, and the rest stand. Exported for the checks.
  */
 export function parseNewsworthy(output: unknown, candidates: Candidate[], universe: Map<string, UniverseToken>): { tokens: NewsworthyToken[]; rejected: Rejection[] } {
-  const entries = typeof output === "object" && output !== null ? (output as { tokens?: unknown }).tokens : null;
-  if (!Array.isArray(entries)) throw new AgentError("invalid_output");
+  const entries = parseNewsworthyEntries(output);
+  if (!entries) throw new AgentError("invalid_output");
   const names = [...universe.values()].map((token) => token.name);
   const tokens: NewsworthyToken[] = [];
   const rejected: Rejection[] = [];
   const seen = new Set<string>();
   for (const entry of entries.slice(0, 3 * MAX_TOKENS)) {
     if (tokens.length === MAX_TOKENS) break;
-    const raw = typeof entry === "object" && entry !== null ? (entry as { symbol?: unknown; sources?: unknown; summary?: unknown }) : {};
-    const symbol = typeof raw.symbol === "string" ? raw.symbol.trim().replace(/^\$/, "").toUpperCase() : "";
+    const parsed = parseEntryRaw(entry);
+    if (!parsed) continue;
+    const { symbol, sources: rawSources, summary: rawSummary } = parsed;
     const refuse = (reason: string) => rejected.push({ symbol: symbol.replace(/[^A-Z0-9]/g, "").slice(0, 12) || "?", reason });
     const token = universe.get(symbol);
     if (!token) { refuse("unknown_ticker"); continue; }
     if (SET_SYMBOLS.has(symbol)) { refuse("set_token"); continue; }
     if (seen.has(symbol)) { refuse("duplicate"); continue; }
-    const numbers = Array.isArray(raw.sources) ? raw.sources.slice(0, 50) : [];
+    const numbers = Array.isArray(rawSources) ? rawSources.slice(0, 50) : [];
     const cited = [...new Set(numbers.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= candidates.length))]
       .slice(0, MAX_SOURCES_PER_TOKEN)
       .map((n) => candidates[n - 1]);
     if (!cited.length) { refuse("no_valid_sources"); continue; }
     const about = cited.filter(({ item }) => mentionsToken(`${item.title} ${item.summary ?? ""}`, token));
     if (!about.length) { refuse("sources_do_not_mention_token"); continue; }
-    const summary = cleanSummary(raw.summary, about.map(({ item }) => `${item.title} ${item.summary ?? ""}`).join("\n"), names);
+    const summary = cleanSummary(rawSummary, about.map(({ item }) => `${item.title} ${item.summary ?? ""}`).join("\n"), names);
     if (!summary) { refuse("unusable_summary"); continue; }
     seen.add(symbol);
     tokens.push({
@@ -299,16 +335,23 @@ export function parseNewsworthy(output: unknown, candidates: Candidate[], univer
 
 // --- State -----------------------------------------------------------------------------------------
 
+function isStoredTokenShape(token: Record<string, unknown>): boolean {
+  if (typeof token.symbol !== "string" || typeof token.name !== "string" || typeof token.market !== "string") return false;
+  if (token.venue !== "hyperliquid" && token.venue !== "gate") return false;
+  if (typeof token.lot !== "number") return false;
+  return typeof token.summary === "string" && token.summary.length <= SUMMARY_MAX_CHARS;
+}
+
+function isStoredTokenOutlets(token: Record<string, unknown>): boolean {
+  if (!Array.isArray(token.outlets)) return false;
+  if (!token.outlets.every((outlet) => typeof outlet === "string")) return false;
+  return typeof token.newestAt === "string" && Number.isFinite(Date.parse(token.newestAt as string));
+}
+
 const isStoredToken = (value: unknown): value is NewsworthyToken => {
   if (typeof value !== "object" || value === null) return false;
   const token = value as Record<string, unknown>;
-  return (
-    typeof token.symbol === "string" && typeof token.name === "string" && typeof token.market === "string" &&
-    (token.venue === "hyperliquid" || token.venue === "gate") && typeof token.lot === "number" &&
-    typeof token.summary === "string" && token.summary.length <= SUMMARY_MAX_CHARS &&
-    Array.isArray(token.outlets) && token.outlets.every((outlet) => typeof outlet === "string") &&
-    typeof token.newestAt === "string" && Number.isFinite(Date.parse(token.newestAt))
-  );
+  return isStoredTokenShape(token) && isStoredTokenOutlets(token);
 };
 
 function load(): Promise<void> {
@@ -335,17 +378,43 @@ async function save(): Promise<void> {
   }
 }
 
+function isRunDue(force: boolean, state: Stored, now: number, every: number): boolean {
+  if (force) return true;
+  if (!state.checkedAt) return true;
+  return now - Date.parse(state.checkedAt) >= every - 60_000;
+}
+
+function isSameNews(force: boolean, signature: string, state: Stored): boolean {
+  if (force) return false;
+  if (signature !== state.signature) return false;
+  return state.agent !== null && state.agent.ok;
+}
+
+function isAgentEnabled(every: number): boolean {
+  return agentPlan().order.length > 0 && every !== 0;
+}
+
+function hasStoredContent(state: Stored): boolean {
+  return state.tokens.length > 0 || state.signature.length > 0;
+}
+
+function agentErrorArgs(error: unknown): { code: string; attempts: AgentAttempt[] } {
+  return error instanceof AgentError
+    ? { code: error.code, attempts: error.attempts }
+    : { code: "internal_error", attempts: [] };
+}
+
 async function run(results: SourceResult[], now: number, force: boolean): Promise<void> {
   await load();
   const state = runtime.state;
   const every = refreshMs();
-  if (!agentPlan().order.length || every === 0) {
+  if (!isAgentEnabled(every)) {
     // Nobody to write the notes: no list, and nothing left over from when there was.
-    if (state.tokens.length || state.signature) { runtime.state = emptyState(); await save(); }
+    if (hasStoredContent(state)) { runtime.state = emptyState(); await save(); }
     return;
   }
   // A little slack, so a run that follows the feed's refresh by a few seconds still counts as due.
-  if (!force && state.checkedAt && now - Date.parse(state.checkedAt) < every - 60_000) return;
+  if (!isRunDue(force, state, now, every)) return;
 
   const stamp = new Date(now).toISOString();
   const fail = async (code: string, attempts: AgentAttempt[] = []) => {
@@ -368,7 +437,7 @@ async function run(results: SourceResult[], now: number, force: boolean): Promis
   }
 
   const signature = createHash("sha1").update([...candidates.map(({ item }) => item.id), "", ...universe.keys()].join("\n")).digest("hex");
-  if (!force && signature === state.signature && state.agent?.ok) {
+  if (isSameNews(force, signature, state)) {
     // The same news as last time: the list stands, and no model is asked.
     state.updatedAt = state.checkedAt = stamp;
     await save();
@@ -388,7 +457,8 @@ async function run(results: SourceResult[], now: number, force: boolean): Promis
     if (outcome.value.rejected.length) console.warn("[newsworthy] entries dropped:", outcome.value.rejected.map((entry) => `${entry.symbol} (${entry.reason})`).join(", "));
     await save();
   } catch (error) {
-    await fail(error instanceof AgentError ? error.code : "internal_error", error instanceof AgentError ? error.attempts : []);
+    const { code, attempts } = agentErrorArgs(error);
+    await fail(code, attempts);
   }
 }
 
@@ -409,6 +479,36 @@ export function refreshNewsworthy(results: SourceResult[], now = Date.now(), opt
   })());
 }
 
+type NewsworthyBase = { updatedAt: string | null; agent: FeedAgentName | null; agentModel: string | null };
+
+function makeNewsworthyBase(state: Stored): NewsworthyBase {
+  const made = state.agent !== null && state.agent.ok ? state.agent : null;
+  return {
+    updatedAt: state.updatedAt,
+    agent: made !== null ? made.agent : null,
+    agentModel: made !== null ? made.model : null,
+  };
+}
+
+function isNewsworthyFresh(state: Stored, now: number): boolean {
+  if (state.updatedAt === null) return false;
+  return now - Date.parse(state.updatedAt) < TTL_MINUTES * 60_000;
+}
+
+function getFailingCode(state: Stored): string | null {
+  if (state.agent === null) return null;
+  return state.agent.ok ? null : state.agent.error;
+}
+
+function notFreshResponse(base: NewsworthyBase, failing: string | null): NewsworthyResponse {
+  return {
+    status: failing !== null ? "error" : "empty",
+    tokens: [],
+    ...base,
+    ...(failing !== null ? { message: failing } : {}),
+  };
+}
+
 /** The current list, from memory. */
 export async function getNewsworthy(now = Date.now()): Promise<NewsworthyResponse> {
   try {
@@ -417,11 +517,10 @@ export async function getNewsworthy(now = Date.now()): Promise<NewsworthyRespons
     // Start empty.
   }
   const state = runtime.state;
-  const made = state.agent?.ok ? state.agent : null;
-  const base = { updatedAt: state.updatedAt, agent: made?.agent ?? null, agentModel: made?.model ?? null };
+  const base = makeNewsworthyBase(state);
   if (!agentPlan().order.length || refreshMs() === 0) return { status: "off", tokens: [], ...base, message: "no agent is configured" };
-  const fresh = state.updatedAt !== null && now - Date.parse(state.updatedAt) < TTL_MINUTES * 60_000;
-  const failing = state.agent && !state.agent.ok ? state.agent.error : null;
-  if (!fresh) return { status: failing ? "error" : "empty", tokens: [], ...base, ...(failing ? { message: failing } : {}) };
-  return { status: state.tokens.length ? "ok" : "empty", tokens: state.tokens, ...base, ...(failing ? { message: `last run failed (${failing}); showing the previous list` } : {}) };
+  const fresh = isNewsworthyFresh(state, now);
+  const failing = getFailingCode(state);
+  if (!fresh) return notFreshResponse(base, failing);
+  return { status: state.tokens.length ? "ok" : "empty", tokens: state.tokens, ...base, ...(failing !== null ? { message: `last run failed (${failing}); showing the previous list` } : {}) };
 }

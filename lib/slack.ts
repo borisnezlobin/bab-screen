@@ -187,95 +187,113 @@ const OK_TTL_MS = 60_000;
 const RETRY_TTL_MS = 10_000;
 
 type Fetched = { value: SpotResult; ttlMs: number };
+type SpotMatch = { message: SlackMessage; ts: string; imageUrl: string };
 
 let cachedSpot: { value: SpotResult; expiresAt: number } | undefined;
 let inFlight: Promise<SpotResult> | undefined;
 
+function buildUnconfiguredResult(): Fetched {
+  return {
+    ttlMs: RETRY_TTL_MS,
+    value: {
+      status: "unconfigured",
+      ...emptyFields(),
+      message: "Add SLACK_BOT_TOKEN and SLACK_CHANNEL_ID to .env.local to show Spotbot images.",
+    },
+  };
+}
+
+function buildEmptyResult(): Fetched {
+  return {
+    ttlMs: OK_TTL_MS,
+    value: {
+      status: "empty",
+      ...emptyFields(),
+      message: "No image from Spotbot was found in the latest channel messages.",
+    },
+  };
+}
+
+function buildErrorResult(error: unknown): Fetched {
+  const code = error instanceof SlackApiError ? error.code : "network_error";
+  return {
+    ttlMs: RETRY_TTL_MS,
+    value: {
+      status: "error",
+      ...emptyFields(),
+      message: `Could not read Slack (${code}). Check the token, scopes, and channel access.`,
+    },
+  };
+}
+
+function collectSpotMatches(messages: SlackMessage[], spotbotId: string | undefined): SpotMatch[] {
+  const matches: SpotMatch[] = [];
+  for (const message of messages) {
+    if (matches.length >= MAX_SPOTS) break;
+    if (spotbotId && message.user !== spotbotId && message.bot_id !== spotbotId) continue;
+    const fileId = imageFile(message)?.id;
+    const imageUrl = fileId ? signedImagePath(fileId) : externalImageUrl(message);
+    if (!message.ts || !imageUrl) continue;
+    matches.push({ message, ts: message.ts, imageUrl });
+  }
+  return matches;
+}
+
+function buildSpots(matches: SpotMatch[], descriptions: Awaited<ReturnType<typeof describeSpot>>[], channel: string): Spot[] {
+  return matches.map(({ ts, imageUrl }, index) => {
+    const timestamp = Number(ts);
+    const { spotter, spotted, text } = descriptions[index];
+    return {
+      id: ts,
+      imageUrl,
+      text,
+      spotter,
+      spotted,
+      postedAt: Number.isFinite(timestamp) ? new Date(timestamp * 1000).toISOString() : null,
+      permalink: `https://app.slack.com/archives/${encodeURIComponent(channel)}/p${ts.replace(".", "")}`,
+    };
+  });
+}
+
+function buildOkResult(spots: Spot[], matches: SpotMatch[]): Fetched {
+  const latest = spots[0];
+  const latestMessage = matches[0].message;
+  const namesMissing = matches.some(({ message }, index) => message.user && !spots[index].spotter);
+  const author =
+    latest.spotter || latestMessage.username || latestMessage.user || latestMessage.bot_id || "Spotbot";
+  return {
+    ttlMs: namesMissing ? RETRY_TTL_MS : OK_TTL_MS,
+    value: {
+      status: "ok",
+      imageUrl: latest.imageUrl,
+      text: latest.text,
+      permalink: latest.permalink,
+      postedAt: latest.postedAt,
+      author,
+      spotter: latest.spotter,
+      spotted: latest.spotted,
+      spots,
+    },
+  };
+}
+
 async function fetchLatestSpot(): Promise<Fetched> {
   const channel = process.env.SLACK_CHANNEL_ID;
-  if (!process.env.SLACK_BOT_TOKEN || !channel) {
-    return {
-      ttlMs: RETRY_TTL_MS,
-      value: {
-        status: "unconfigured",
-        ...emptyFields(),
-        message: "Add SLACK_BOT_TOKEN and SLACK_CHANNEL_ID to .env.local to show Spotbot images.",
-      },
-    };
-  }
+  if (!process.env.SLACK_BOT_TOKEN || !channel) return buildUnconfiguredResult();
 
   try {
     const payload = await slackGet<{ messages?: SlackMessage[] }>("conversations.history", {
       channel,
       limit: "100",
     });
-    const spotbotId = process.env.SLACK_SPOTBOT_USER_ID;
+    const matches = collectSpotMatches(payload.messages ?? [], process.env.SLACK_SPOTBOT_USER_ID);
+    if (matches.length === 0) return buildEmptyResult();
 
-    // conversations.history is newest first, so the first MAX_SPOTS matches are the latest ones.
-    const matches: Array<{ message: SlackMessage; ts: string; imageUrl: string }> = [];
-    for (const message of payload.messages ?? []) {
-      if (matches.length >= MAX_SPOTS) break;
-      if (spotbotId && message.user !== spotbotId && message.bot_id !== spotbotId) continue;
-      const fileId = imageFile(message)?.id;
-      const imageUrl = fileId ? signedImagePath(fileId) : externalImageUrl(message);
-      if (!message.ts || !imageUrl) continue;
-      matches.push({ message, ts: message.ts, imageUrl });
-    }
-    if (matches.length === 0) {
-      return {
-        ttlMs: OK_TTL_MS,
-        value: {
-          status: "empty",
-          ...emptyFields(),
-          message: "No image from Spotbot was found in the latest channel messages.",
-        },
-      };
-    }
-
-    // describeSpot never throws; names it can't resolve come back as null / omitted.
     const descriptions = await Promise.all(matches.map(({ message }) => describeSpot(message)));
-    const spots: Spot[] = matches.map(({ ts, imageUrl }, index) => {
-      const timestamp = Number(ts);
-      const { spotter, spotted, text } = descriptions[index];
-      return {
-        id: ts,
-        imageUrl,
-        text,
-        spotter,
-        spotted,
-        postedAt: Number.isFinite(timestamp) ? new Date(timestamp * 1000).toISOString() : null,
-        permalink: `https://app.slack.com/archives/${encodeURIComponent(channel)}/p${ts.replace(".", "")}`,
-      };
-    });
-
-    const latest = spots[0];
-    const latestMessage = matches[0].message;
-    // A human poster without a name means the lookup failed (scope, rate limit, network): retry sooner.
-    const namesMissing = matches.some(({ message }, index) => message.user && !spots[index].spotter);
-    return {
-      ttlMs: namesMissing ? RETRY_TTL_MS : OK_TTL_MS,
-      value: {
-        status: "ok",
-        imageUrl: latest.imageUrl,
-        text: latest.text,
-        permalink: latest.permalink,
-        postedAt: latest.postedAt,
-        author: latest.spotter || latestMessage.username || latestMessage.user || latestMessage.bot_id || "Spotbot",
-        spotter: latest.spotter,
-        spotted: latest.spotted,
-        spots,
-      },
-    };
+    const spots = buildSpots(matches, descriptions, channel);
+    return buildOkResult(spots, matches);
   } catch (error) {
-    const code = error instanceof SlackApiError ? error.code : "network_error";
-    return {
-      ttlMs: RETRY_TTL_MS,
-      value: {
-        status: "error",
-        ...emptyFields(),
-        message: `Could not read Slack (${code}). Check the token, scopes, and channel access.`,
-      },
-    };
+    return buildErrorResult(error);
   }
 }
 

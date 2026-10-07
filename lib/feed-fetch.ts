@@ -39,21 +39,36 @@ export type FetchContext = {
 const POST_MAX = 400;
 const POST_MIN = 30;
 
+const BSKY_WWW_RE = /^www\./;
+const BSKY_HANDLE_RE = /^[a-z0-9.-]+$/i;
+const BSKY_KEY_RE = /^[a-z0-9]+$/i;
+const HN_ID_RE = /^\d+$/;
+const NETWORK_DETAIL_RE = /^[A-Z0-9_]{3,40}$/;
+
 class HttpError extends Error {
   constructor(public readonly code: string) {
     super(code);
   }
 }
 
+type ErrorCause = { code?: unknown; name?: unknown };
+
+function causeDetail(error: unknown): string | null {
+  const cause = error instanceof Error ? (error.cause as ErrorCause | undefined) : undefined;
+  return typeof cause?.code === "string" ? cause.code : typeof cause?.name === "string" ? cause.name : null;
+}
+
+function networkErrorCode(detail: string | null): string {
+  return detail && NETWORK_DETAIL_RE.test(detail) ? `network_error (${detail})` : "network_error";
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof HttpError) return error.code;
   const name = error instanceof Error ? error.name : "";
   if (name === "TimeoutError" || name === "AbortError") return "timeout";
-  // fetch() reports DNS, TLS and socket failures as a TypeError whose cause carries the code.
-  const cause = error instanceof Error ? (error.cause as { code?: unknown; name?: unknown } | undefined) : undefined;
-  const detail = typeof cause?.code === "string" ? cause.code : typeof cause?.name === "string" ? cause.name : null;
+  const detail = causeDetail(error);
   if (detail === "TimeoutError" || detail === "AbortError" || detail === "UND_ERR_CONNECT_TIMEOUT") return "timeout";
-  if (error instanceof TypeError) return detail && /^[A-Z0-9_]{3,40}$/.test(detail) ? `network_error (${detail})` : "network_error";
+  if (error instanceof TypeError) return networkErrorCode(detail);
   return `internal_error${name ? ` (${name.slice(0, 40)})` : ""}`;
 }
 
@@ -119,43 +134,89 @@ const text = (value: unknown): string | null => (typeof value === "string" && va
 
 // --- RSS / Atom ----------------------------------------------------------------------------------
 
+function buildRssConditionalHeaders(cache: SourceCache | undefined): Record<string, string> {
+  const headers: Record<string, string> = { Accept: "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5" };
+  if (cache?.etag) headers["If-None-Match"] = cache.etag;
+  if (cache?.lastModified) headers["If-Modified-Since"] = cache.lastModified;
+  return headers;
+}
+
+type EntryWithCategories = FeedItem & { categories: string[] };
+
+function filterRssItems(entries: EntryWithCategories[], now: number, maxAge: number): FeedItem[] {
+  const items: FeedItem[] = [];
+  for (const { categories, ...item } of fresh(entries, now, maxAge) as EntryWithCategories[]) {
+    if (!rejectReason(item, categories)) items.push(item);
+  }
+  return items;
+}
+
+async function attemptRssFetch(source: RssSource, context: FetchContext, cache: SourceCache | undefined, maxAge: number): Promise<FeedItem[]> {
+  const headers = buildRssConditionalHeaders(cache);
+  const response = await get(source.url, headers);
+  if (response.status === 304 && cache) {
+    cache.fetchedAt = context.now;
+    return fresh(cache.items, context.now, maxAge);
+  }
+  if (response.status < 200 || response.status >= 300) throw new HttpError(`http_${response.status}`);
+  const parsed = parseFeed(response.body, source.name, context.now);
+  if (!parsed.recognised) throw new HttpError("not_a_feed");
+  const items = filterRssItems(parsed.entries as EntryWithCategories[], context.now, maxAge);
+  context.caches.set(source.name, {
+    etag: response.headers.get("etag") ?? undefined,
+    lastModified: response.headers.get("last-modified") ?? undefined,
+    fetchedAt: context.now,
+    items,
+  });
+  return items;
+}
+
 async function fetchRss(source: RssSource, context: FetchContext): Promise<SourceResult> {
   const maxAge = source.maxAgeHours ?? MAX_AGE_HOURS;
   const cache = context.caches.get(source.name);
-  const cached = () => fresh(cache?.items ?? [], context.now, maxAge);
+  const cachedItems = (): FeedItem[] => { return fresh(cache ? cache.items : [], context.now, maxAge); };
   if (cache && source.everyMinutes && context.now - cache.fetchedAt < source.everyMinutes * 60_000 - 30_000) {
-    return { name: source.name, kind: "news", ok: true, items: cached(), error: null };
+    return { name: source.name, kind: "news", ok: true, items: cachedItems(), error: null };
   }
   try {
-    const conditional: Record<string, string> = { Accept: "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5" };
-    if (cache?.etag) conditional["If-None-Match"] = cache.etag;
-    if (cache?.lastModified) conditional["If-Modified-Since"] = cache.lastModified;
-    const response = await get(source.url, conditional);
-    if (response.status === 304 && cache) {
-      cache.fetchedAt = context.now;
-      return { name: source.name, kind: "news", ok: true, items: cached(), error: null };
-    }
-    if (response.status < 200 || response.status >= 300) throw new HttpError(`http_${response.status}`);
-    const parsed = parseFeed(response.body, source.name, context.now);
-    if (!parsed.recognised) throw new HttpError("not_a_feed");
-    const items: FeedItem[] = [];
-    for (const { categories, ...item } of fresh(parsed.entries, context.now, maxAge) as (FeedItem & { categories: string[] })[]) {
-      if (!rejectReason(item, categories)) items.push(item);
-    }
-    context.caches.set(source.name, {
-      etag: response.headers.get("etag") ?? undefined,
-      lastModified: response.headers.get("last-modified") ?? undefined,
-      fetchedAt: context.now,
-      items,
-    });
+    const items = await attemptRssFetch(source, context, cache, maxAge);
     return { name: source.name, kind: "news", ok: true, items, error: null };
   } catch (error) {
     // Keep showing what the last good fetch had while the source is down.
-    return { name: source.name, kind: "news", ok: false, items: cached(), error: errorCode(error) };
+    return { name: source.name, kind: "news", ok: false, items: cachedItems(), error: errorCode(error) };
   }
 }
 
 // --- Hacker News ---------------------------------------------------------------------------------
+
+function hnItemId(hit: Record<string, unknown>): string | null {
+  return text(hit.objectID) ?? (typeof hit.story_id === "number" ? String(hit.story_id) : null);
+}
+
+function parseHnHit(hit: Record<string, unknown>, name: string, now: number): FeedItem | null {
+  const title = text(hit.title);
+  const id = hnItemId(hit);
+  const published = Date.parse(text(hit.created_at) ?? "");
+  if (!title || !id || !HN_ID_RE.test(id) || !Number.isFinite(published)) return null;
+  if (typeof hit.points !== "number" || hit.points < HACKER_NEWS.minPoints) return null;
+  return {
+    id: makeId(name, id),
+    kind: "news",
+    source: name,
+    author: null,
+    handle: null,
+    title: clip(tidy(decodeEntities(title)), 220),
+    summary: null,
+    url: canonicalUrl(text(hit.url)) ?? `https://news.ycombinator.com/item?id=${id}`,
+    publishedAt: new Date(Math.min(published, now)).toISOString(),
+    imageUrl: null,
+  };
+}
+
+function cachedSourceItems(caches: Map<string, SourceCache>, name: string, now: number, maxAgeHours: number): FeedItem[] {
+  const prior = caches.get(name);
+  return fresh(prior ? prior.items : [], now, maxAgeHours);
+}
 
 async function fetchHackerNews(context: FetchContext): Promise<SourceResult> {
   const name = HACKER_NEWS.name;
@@ -166,56 +227,44 @@ async function fetchHackerNews(context: FetchContext): Promise<SourceResult> {
     const items: FeedItem[] = [];
     for (const hit of hits) {
       if (!isRecord(hit)) continue;
-      const title = text(hit.title);
-      const id = text(hit.objectID) ?? (typeof hit.story_id === "number" ? String(hit.story_id) : null);
-      const published = Date.parse(text(hit.created_at) ?? "");
-      if (!title || !id || !/^\d+$/.test(id) || !Number.isFinite(published)) continue;
-      if (typeof hit.points !== "number" || hit.points < HACKER_NEWS.minPoints) continue;
-      const item: FeedItem = {
-        id: makeId(name, id),
-        kind: "news",
-        source: name,
-        author: null,
-        handle: null,
-        title: clip(tidy(decodeEntities(title)), 220),
-        summary: null,
-        url: canonicalUrl(text(hit.url)) ?? `https://news.ycombinator.com/item?id=${id}`,
-        publishedAt: new Date(Math.min(published, context.now)).toISOString(),
-        imageUrl: null,
-      };
-      if (!rejectReason(item)) items.push(item);
+      const item = parseHnHit(hit, name, context.now);
+      if (item && !rejectReason(item)) items.push(item);
     }
     const kept = fresh(items, context.now, MAX_AGE_HOURS);
     context.caches.set(name, { fetchedAt: context.now, items: kept });
     return { name, kind: "news", ok: true, items: kept, error: null };
   } catch (error) {
-    const cached = fresh(context.caches.get(name)?.items ?? [], context.now, MAX_AGE_HOURS);
-    return { name, kind: "news", ok: false, items: cached, error: errorCode(error) };
+    return { name, kind: "news", ok: false, items: cachedSourceItems(context.caches, name, context.now, MAX_AGE_HOURS), error: errorCode(error) };
   }
 }
 
 // --- Bluesky -------------------------------------------------------------------------------------
 
-/** Post text with each link facet (shown truncated, "example.com/a-long-pa...") replaced by its host. */
-function blueskyText(record: Record<string, unknown>): string {
-  const raw = text(record.text) ?? "";
-  const facets = Array.isArray(record.facets) ? record.facets : [];
+function extractFeatureHost(feature: unknown, byteStart: number, byteEnd: number): { start: number; end: number; host: string } | null {
+  if (!isRecord(feature) || feature.$type !== "app.bsky.richtext.facet#link") return null;
+  try {
+    return { start: byteStart, end: byteEnd, host: new URL(String(feature.uri)).hostname.replace(BSKY_WWW_RE, "") };
+  } catch {
+    return null;
+  }
+}
+
+function extractFacetLinks(facets: unknown[]): { start: number; end: number; host: string }[] {
   const links: { start: number; end: number; host: string }[] = [];
   for (const facet of facets) {
     if (!isRecord(facet) || !isRecord(facet.index) || !Array.isArray(facet.features)) continue;
-    const { byteStart, byteEnd } = facet.index;
+    const { byteStart, byteEnd } = facet.index as { byteStart: number; byteEnd: number };
     if (typeof byteStart !== "number" || typeof byteEnd !== "number" || byteEnd <= byteStart) continue;
     for (const feature of facet.features) {
-      if (!isRecord(feature) || feature.$type !== "app.bsky.richtext.facet#link") continue;
-      try {
-        links.push({ start: byteStart, end: byteEnd, host: new URL(String(feature.uri)).hostname.replace(/^www\./, "") });
-      } catch {
-        // Not a URL; leave the text as written.
-      }
+      const link = extractFeatureHost(feature, byteStart, byteEnd);
+      if (link) links.push(link);
     }
   }
+  return links;
+}
+
+function applyLinkReplacements(raw: string, links: { start: number; end: number; host: string }[]): string {
   if (!links.length) return tidy(raw);
-  // Facet offsets are UTF-8 byte positions.
   const bytes = Buffer.from(raw, "utf8");
   let out = "";
   let at = 0;
@@ -227,43 +276,80 @@ function blueskyText(record: Record<string, unknown>): string {
   return tidy(out + bytes.subarray(at).toString("utf8"));
 }
 
+/** Post text with each link facet (shown truncated, "example.com/a-long-pa...") replaced by its host. */
+function blueskyText(record: Record<string, unknown>): string {
+  const raw = text(record.text) ?? "";
+  const facets = Array.isArray(record.facets) ? record.facets : [];
+  return applyLinkReplacements(raw, extractFacetLinks(facets));
+}
+
+function hasContentLabel(post: Record<string, unknown>, record: Record<string, unknown>): boolean {
+  if (Array.isArray(post.labels) && post.labels.length) return true;
+  if (isRecord(record.labels) && Array.isArray(record.labels.values) && record.labels.values.length) return true;
+  return false;
+}
+
+function isEnglishPost(record: Record<string, unknown>): boolean {
+  if (!Array.isArray(record.langs) || !record.langs.length) return true;
+  return record.langs.some((lang) => typeof lang === "string" && lang.toLowerCase().startsWith("en"));
+}
+
+function blueskyPostFields(entry: Record<string, unknown>): { post: Record<string, unknown>; record: Record<string, unknown>; author: Record<string, unknown> } | null {
+  if (entry.reason || entry.reply) return null;
+  const post = entry.post;
+  if (!isRecord(post) || !isRecord(post.record) || !isRecord(post.author)) return null;
+  const record = post.record;
+  if (record.reply) return null;
+  if (hasContentLabel(post, record)) return null;
+  if (!isEnglishPost(record)) return null;
+  return { post, record, author: post.author as Record<string, unknown> };
+}
+
+function blueskyPostIds(rawHandle: string | null, rawUri: string | null): { key: string; handle: string; uri: string } | null {
+  if (!rawHandle || !rawUri) return null;
+  if (!BSKY_HANDLE_RE.test(rawHandle)) return null;
+  const key = rawUri.split("/").pop();
+  if (!key || !BSKY_KEY_RE.test(key)) return null;
+  return { key, handle: rawHandle, uri: rawUri };
+}
+
+function blueskyPostImage(post: Record<string, unknown>): string | null {
+  const embed = isRecord(post.embed) ? post.embed : null;
+  const firstImage = embed && Array.isArray(embed.images) && isRecord(embed.images[0]) ? text(embed.images[0].thumb) : null;
+  const external = embed && isRecord(embed.external) ? text(embed.external.thumb) : null;
+  return httpsImage(firstImage ?? external);
+}
+
+function buildBlueskyItem(post: Record<string, unknown>, record: Record<string, unknown>, author: Record<string, unknown>, now: number): FeedItem | null {
+  const ids = blueskyPostIds(text(author.handle), text(post.uri));
+  const published = Date.parse(text(record.createdAt) ?? "");
+  if (!ids || !Number.isFinite(published)) return null;
+  const body = blueskyText(record);
+  if (body.length < POST_MIN) return null;
+  return {
+    id: makeId(BLUESKY.name, ids.uri),
+    kind: "tweet",
+    source: BLUESKY.name,
+    author: text(author.displayName) ? tidy(String(author.displayName)) : ids.handle,
+    handle: `@${ids.handle}`,
+    title: clip(body, POST_MAX),
+    summary: null,
+    url: `https://bsky.app/profile/${ids.handle}/post/${ids.key}`,
+    publishedAt: new Date(Math.min(published, now)).toISOString(),
+    imageUrl: blueskyPostImage(post),
+  };
+}
+
 function blueskyPosts(data: unknown, now: number): FeedItem[] {
   const feed = isRecord(data) && Array.isArray(data.feed) ? data.feed : null;
   if (!feed) throw new HttpError("unexpected_shape");
   const items: FeedItem[] = [];
   for (const entry of feed) {
-    if (!isRecord(entry) || entry.reason || entry.reply) continue; // reposts and replies
-    const post = entry.post;
-    if (!isRecord(post) || !isRecord(post.record) || !isRecord(post.author)) continue;
-    const record = post.record;
-    if (record.reply) continue;
-    // Anything carrying a moderation or self-applied content label stays off the wall.
-    if (Array.isArray(post.labels) && post.labels.length) continue;
-    if (isRecord(record.labels) && Array.isArray(record.labels.values) && record.labels.values.length) continue;
-    if (Array.isArray(record.langs) && record.langs.length && !record.langs.some((lang) => typeof lang === "string" && lang.toLowerCase().startsWith("en"))) continue;
-    const handle = text(post.author.handle);
-    const uri = text(post.uri);
-    const published = Date.parse(text(record.createdAt) ?? "");
-    const key = uri ? uri.split("/").pop() : null;
-    if (!handle || !uri || !key || !/^[a-z0-9.-]+$/i.test(handle) || !/^[a-z0-9]+$/i.test(key) || !Number.isFinite(published)) continue;
-    const body = blueskyText(record);
-    if (body.length < POST_MIN) continue;
-    const embed = isRecord(post.embed) ? post.embed : null;
-    const firstImage = embed && Array.isArray(embed.images) && isRecord(embed.images[0]) ? text(embed.images[0].thumb) : null;
-    const external = embed && isRecord(embed.external) ? text(embed.external.thumb) : null;
-    const item: FeedItem = {
-      id: makeId(BLUESKY.name, uri),
-      kind: "tweet",
-      source: BLUESKY.name,
-      author: text(post.author.displayName) ? tidy(String(post.author.displayName)) : handle,
-      handle: `@${handle}`,
-      title: clip(body, POST_MAX),
-      summary: null,
-      url: `https://bsky.app/profile/${handle}/post/${key}`,
-      publishedAt: new Date(Math.min(published, now)).toISOString(),
-      imageUrl: httpsImage(firstImage ?? external),
-    };
-    if (!rejectReason(item)) items.push(item);
+    if (!isRecord(entry)) continue;
+    const fields = blueskyPostFields(entry);
+    if (!fields) continue;
+    const item = buildBlueskyItem(fields.post, fields.record, fields.author, now);
+    if (item && !rejectReason(item)) items.push(item);
   }
   return items;
 }

@@ -1,708 +1,209 @@
-/* Colours and faces are the brand's (app/brand.css); these names are what the rest of the stylesheet uses. */
+@import "tailwindcss";
+
 :root {
-  --bg: var(--bab-black);
-  --ink: var(--bab-text);
-  --muted: var(--text-secondary);
-  --faint: var(--text-label);
-  --line: var(--rule);
-  --line-strong: var(--rule-lit);
-  --up: var(--signal-up);
-  --down: var(--signal-down);
-  --mono: var(--bab-mono);
-  --sans: var(--bab-sans);
-  --display: var(--bab-display);
-  --fit: 1;
-  --now-playing-height: 120px;
+  --grey-100: oklch(0.955 0.002 70);
+  --grey-150: oklch(0.925 0.003 70);
+  --grey-200: oklch(0.885 0.003 70);
+  --grey-250: oklch(0.84 0.004 70);
+  --grey-400: oklch(0.74 0.004 70);
+  --grey-500: oklch(0.6 0.004 70);
+  --grey-600: oklch(0.46 0.004 70);
+  --grey-700: oklch(0.36 0.004 70);
+  --grey-900: oklch(0.2 0.004 70);
+
+  --ember-200: oklch(0.87 0.085 62);
+  --ember-300: oklch(0.74 0.16 48);
+  --ember-500: oklch(0.64 0.19 42);
+  --ember-700: oklch(0.5 0.15 40);
+
+  --green-700: oklch(0.45 0.12 150);
+  --red-700: oklch(0.49 0.18 27);
 }
 
-* {
-  box-sizing: border-box;
-}
+@theme {
+  --color-*: initial;
+  --color-canvas: var(--grey-200);
+  --color-surface: var(--grey-150);
+  --color-surface-sunk: var(--grey-250);
+  --color-rule: var(--grey-400);
+  --color-rule-strong: var(--grey-500);
+  --color-text: var(--grey-900);
+  --color-text-secondary: var(--grey-700);
+  --color-text-muted: var(--grey-600);
+  --color-accent: var(--ember-500);
+  --color-accent-text: var(--ember-700);
+  --color-accent-glow: var(--ember-300);
+  --color-accent-hot: var(--ember-200);
+  --color-up: var(--green-700);
+  --color-down: var(--red-700);
+  --color-paper: var(--grey-100);
+  --color-ink: var(--grey-900);
+  --color-edge: oklch(0 0 0 / 0.1);
+  --color-transparent: transparent;
+  --color-current: currentColor;
 
-html,
-body {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: var(--bg);
-}
+  --font-sans: var(--font-barlow), ui-sans-serif, system-ui, sans-serif;
+  --font-narrow: var(--font-barlow-narrow), var(--font-barlow), ui-sans-serif, sans-serif;
 
-body {
-  margin: 0;
-  color: var(--ink);
-  font-family: var(--sans);
-}
+  --text-meta: 1rem;
+  --text-meta--line-height: 1.375rem;
+  --text-label: 1.125rem;
+  --text-label--line-height: 1.5rem;
+  --text-body: 1.25rem;
+  --text-body--line-height: 1.75rem;
+  --text-title: 1.5rem;
+  --text-title--line-height: 1.875rem;
+  --text-subhead: 1.875rem;
+  --text-subhead--line-height: 2.25rem;
+  --text-headline: 2.5rem;
+  --text-headline--line-height: 2.75rem;
+  --text-feature: 3.25rem;
+  --text-feature--line-height: 3.25rem;
+  --text-hero: 4.5rem;
+  --text-hero--line-height: 4.25rem;
+  --text-display: 6rem;
+  --text-display--line-height: 5.25rem;
 
-p {
-  margin: 0;
-}
+  --leading-fit: 1.05;
 
-/* Fixed 1920x1080 stage, scaled to the window by --fit (set in page.tsx). */
-.dashboard {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 1920px;
-  height: 1080px;
-  transform: translate(-50%, -50%) scale(var(--fit));
-  overflow: hidden;
-  /* Clear: the waves (app/Background.tsx) are behind the stage, and the text sits straight on them. */
-  background: transparent;
-  /* The brand's rhythm is 46 and 31. 46 + 42 + 42 + 46 keeps the middle column at the 816px the chart is tuned for. */
-  padding: var(--bab-row);
-  display: grid;
-  grid-template-columns: 432px minmax(0, 1fr) 496px;
-  grid-template-rows: 56px minmax(0, 1fr);
-  column-gap: 42px;
-  row-gap: var(--bab-pad);
-}
+  --radius-inner: 0.25rem;
 
-/* The ledger frame: a hairline around everything on the stage, half a column gap outside the content. */
-.dashboard::before {
-  content: "";
-  position: absolute;
-  inset: 25px;
-  z-index: -1;
-  border: var(--bab-hair) solid var(--line);
-}
+  --shadow-glow: 0 0 18px 2px oklch(0.64 0.19 42 / 0.45);
+  --drop-shadow-glow: 0 0 6px var(--ember-300);
 
-/* Ledger rules: one under the masthead, one in each column gap, all meeting the frame. */
-.top-row,
-.featured-slot {
-  position: relative;
-}
+  --ease-out-soft: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
 
-.top-row::after,
-.featured-slot::before,
-.featured-slot::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-}
+  --animate-fade-in: fade-in 600ms var(--ease-out-soft) both;
+  --animate-swap-in: fade-in 240ms ease-out both;
+  --animate-tape: tape-scroll 60s linear infinite;
+  --animate-ember-pulse: ember-pulse 2.4s var(--ease-in-out-soft) infinite;
+  --animate-candle-in: candle-in 520ms var(--ease-out-soft) both;
+  --animate-rise-in: rise-in 700ms var(--ease-out-soft) both;
+  --animate-countdown: countdown 12s linear both;
+  --animate-drain: drain 60s linear forwards;
+  --animate-heat: heat 3.2s var(--ease-in-out-soft) infinite;
+  --animate-cell-in: cell-in 500ms var(--ease-out-soft) both;
 
-.top-row::after {
-  left: -21px;
-  right: -21px;
-  bottom: -16px;
-  border-top: var(--bab-hair) solid var(--line);
-}
-
-.featured-slot::before,
-.featured-slot::after {
-  top: -15px;
-  bottom: -21px;
-  border-left: var(--bab-hair) solid var(--line);
-}
-
-.featured-slot::before {
-  left: -21px;
-}
-
-.featured-slot::after {
-  right: -22px;
-}
-
-/* Row 1: the B@B mark at the left edge, then the ticker tape in the width that is left. */
-.top-row {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 24px;
-}
-
-.brand-logo {
-  flex: none;
-  display: block;
-  /* 344x311 artwork at the row's 56px height is 61.94px wide; a whole-pixel box keeps the tape's left edge on the pixel grid. */
-  width: 62px;
-  height: 56px;
-  object-fit: contain;
-}
-
-.tape-slot {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-}
-
-/* Middle column: featured market (header above its chart). */
-.featured-slot {
-  grid-column: 2;
-  grid-row: 2;
-  min-width: 0;
-  min-height: 0;
-}
-
-/* Left column, under the logo: the news and posts feed, and under it the coin flip tile while it is set up. */
-.feed-slot {
-  grid-column: 1;
-  grid-row: 2;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.feed-box {
-  flex: 1;
-  min-height: 0;
-}
-
-.feed {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-/* clip, not hidden: nothing (focus, find-in-page) can scroll this box out from under the animation. */
-.feed-viewport {
-  flex: 1;
-  min-height: 0;
-  overflow: clip;
-}
-
-/* While the list moves, items fade in at the top edge and out at the bottom instead of being cut mid-line. */
-.feed.is-scrolling .feed-viewport {
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 56px), transparent 100%);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 56px, #000 calc(100% - 56px), transparent 100%);
-}
-
-.feed-track {
-  position: relative;
-  will-change: transform;
-}
-
-/* The list moves downward, so the copy that follows the one on screen sits above it. */
-.feed.is-scrolling .feed-track {
-  display: flex;
-  flex-direction: column-reverse;
-}
-
-.feed-group {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  animation: feed-in .6s ease-out;
-}
-
-@keyframes feed-in {
-  from {
-    opacity: 0;
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes tape-scroll {
+    from {
+      transform: translateX(-50%);
+    }
+  }
+  @keyframes ember-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+      scale: 0.9;
+    }
+    50% {
+      opacity: 1;
+      scale: 1;
+    }
+  }
+  @keyframes candle-in {
+    from {
+      opacity: 0;
+      scale: 1 0.2;
+    }
+  }
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      translate: 0 16px;
+    }
+  }
+  @keyframes drain {
+    from {
+      scale: var(--drain-from, 1) 1;
+    }
+    to {
+      scale: 0 1;
+    }
+  }
+  @keyframes countdown {
+    to {
+      scale: 0 1;
+    }
+  }
+  @keyframes heat {
+    0%,
+    100% {
+      fill: var(--ember-500);
+    }
+    50% {
+      fill: var(--ember-300);
+    }
+  }
+  @keyframes cell-in {
+    from {
+      fill: var(--ember-200);
+      opacity: 0;
+    }
   }
 }
 
-/* Whole-pixel line heights and padding keep every item, and so the loop distance, on the pixel grid. */
-.feed-item {
-  padding: 22px 0 24px;
-  border-bottom: 1px solid var(--line);
+@utility shard {
+  clip-path: polygon(30% 0, 100% 0, 70% 100%, 0 100%);
 }
 
-.feed-link {
-  display: block;
-  color: inherit;
-  text-decoration: none;
+@utility shard-mirror {
+  clip-path: polygon(0 0, 70% 0, 100% 100%, 30% 100%);
 }
 
-.feed-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 8px;
-  color: var(--faint);
-  font: 400 18px/26px var(--mono);
-  white-space: nowrap;
+@utility figures {
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
-/* A name and a handle too long for the line both give way, each in proportion to its length. */
-.feed-source {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--muted);
-  font: 500 20px/26px var(--sans);
+@utility fade-x {
+  mask-image: linear-gradient(to right, transparent, black 4%, black 96%, transparent);
 }
 
-.feed-handle {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+@utility fade-l {
+  mask-image: linear-gradient(to right, transparent, black 12%);
 }
 
-.feed-time {
-  flex: none;
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  text-transform: uppercase;
+@utility fade-y {
+  mask-image: linear-gradient(to bottom, transparent, black 6%, black 85%, transparent);
 }
 
-.feed-title,
-.feed-summary {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
+@utility bab-mark {
+  mask: url("/bab-logo.svg") center / contain no-repeat;
 }
 
-.feed-title {
-  -webkit-line-clamp: 4;
-  font-size: 28px;
-  font-weight: 500;
-  line-height: 35px;
-}
+@layer base {
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--color-canvas);
+  }
 
-.feed-summary {
-  -webkit-line-clamp: 3;
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 22px;
-  line-height: 29px;
-}
+  body {
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
 
-/* A post is someone speaking, not a headline: set as running text behind a quote rule. */
-.feed-item.is-tweet .feed-link {
-  padding-left: 19px;
-  border-left: var(--bab-hair) solid var(--line-strong);
-}
-
-.feed-item.is-tweet .feed-title {
-  -webkit-line-clamp: 7;
-  font-size: 24px;
-  font-weight: 400;
-  line-height: 32px;
-}
-
-.feed-note {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 28px;
-}
-
-/* Right column, 496 x 901: what Spotify is playing, the carousel of spotted photos, quotes and chumming photos in
-   the height that is left, and under it the club calendar while it has events to list. */
-.side-slot {
-  --side-gap: 24px;
-  /* Label, rule and two 72px rows with a rule between them (app/Events.tsx): 32 + 72 + 1 + 72. */
-  --events-height: 177px;
-  grid-column: 3;
-  grid-row: 2;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--side-gap);
-}
-
-/* The calendar's place under the carousel. Closed (no events, or the Jam QR is up) it takes no height and the
-   carousel has the column; the negative margin cancels the column's gap, which the box inside carries instead. */
-.events-slot {
-  flex: none;
-  height: 0;
-  margin-top: calc(-1 * var(--side-gap));
-  overflow: hidden;
-  opacity: 0;
-  visibility: hidden;
-  transition: height var(--bab-slow) var(--bab-ease), opacity var(--bab-fast) linear, visibility 0s linear var(--bab-slow);
-}
-
-.events-slot.is-open {
-  height: calc(var(--events-height) + var(--side-gap));
-  opacity: 1;
-  visibility: visible;
-  transition: height var(--bab-slow) var(--bab-ease), opacity var(--bab-slow) linear var(--bab-fast), visibility 0s;
-}
-
-/* The Jam QR takes 180px more than the song for its minute. The calendar steps aside for that minute rather than
-   the photo: its 201px go back to the carousel, so the picture stays about the size it was. */
-.side-slot:has(.now-playing.is-jam) .events-slot {
-  height: 0;
-  opacity: 0;
-  visibility: hidden;
-  transition: height var(--bab-slow) var(--bab-ease), opacity var(--bab-fast) linear, visibility 0s linear var(--bab-slow);
-}
-
-/* Always its full height, even while the slot around it is opening or closed, so the row count never changes mid-move. */
-.events-box {
-  height: var(--events-height);
-  margin-top: var(--side-gap);
-}
-
-.now-playing {
-  flex: none;
-  height: var(--now-playing-height);
-  min-width: 0;
-  display: flex;
-  gap: 20px;
-  /* The tile is taller while it shows the Jam QR; the photo below gives up that height for the minute. */
-  transition: height var(--bab-slow) var(--bab-ease);
-}
-
-.now-playing-art {
-  flex: none;
-  height: 100%;
-  aspect-ratio: 1;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  background: var(--bab-surface-1);
-}
-
-/* Covers and spotted photos are shown as they are, in full colour: no filter, tint or overlay. */
-.now-playing-art img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.now-playing-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.now-playing-title {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  font-size: 30px;
-  font-weight: 500;
-  line-height: 1.2;
-}
-
-.now-playing-meta {
-  margin-top: 2px;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-  color: var(--muted);
-  font-size: 22px;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-.now-playing-artist {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.now-playing-state {
-  flex: none;
-  color: var(--faint);
-  font: 400 20px/1.3 var(--mono);
-  text-transform: uppercase;
-}
-
-/* Who asked for the track in Slack. It takes the title's second line, so the tile stays the same height. */
-.now-playing.has-credit .now-playing-title {
-  -webkit-line-clamp: 1;
-}
-
-.now-playing-credit {
-  overflow: hidden;
-  color: var(--faint);
-  font-size: 20px;
-  line-height: 1.3;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.now-playing-credit-name {
-  color: var(--ink);
-}
-
-.now-playing.is-paused .now-playing-credit-name {
-  color: var(--muted);
-}
-
-/* A live signal, how far into the track Spotify is, so it gets the gold. */
-.now-playing-bar {
-  margin-top: auto;
-  flex: none;
-  height: 6px;
-  overflow: hidden;
-  background: var(--line);
-}
-
-.now-playing-fill {
-  display: block;
-  height: 100%;
-  background: var(--bab-gold);
-  transform: scaleX(0);
-  transform-origin: left;
-  transition: transform .5s linear;
-}
-
-.now-playing.is-paused .now-playing-title {
-  color: var(--muted);
-}
-
-.now-playing.is-paused .now-playing-art img {
-  opacity: .45;
-}
-
-.now-playing.is-paused .now-playing-fill {
-  background: var(--faint);
-}
-
-.now-playing.is-empty {
-  align-items: center;
-  justify-content: center;
-  padding: 0 24px;
-  border: 1px solid var(--line);
-}
-
-.now-playing-note {
-  color: var(--muted);
-  font-size: 22px;
-  line-height: 1.3;
-  text-align: center;
-  text-wrap: balance;
-}
-
-/* Jam QR, up for a minute in place of the song. At the tile's usual 120px a QR is too small to scan from across
-   a room, so for that minute the tile is 300px tall. The height must match JAM_QR_BOX_PX in NowPlaying.tsx. */
-.now-playing.is-jam {
-  height: 300px;
-}
-
-/* The one light surface on the stage: scanners need dark modules on a light ground with a light margin. */
-.jam-qr {
-  flex: none;
-  height: 100%;
-  aspect-ratio: 1;
-  overflow: hidden;
-  background: var(--bab-white);
-}
-
-.jam-qr svg {
-  display: block;
-  fill: var(--bab-black-true);
-}
-
-.jam-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.jam-eyebrow {
-  color: var(--faint);
-  font: 400 20px/1.3 var(--mono);
-  text-transform: uppercase;
-}
-
-.jam-title {
-  margin-top: 10px;
-  font-size: 30px;
-  font-weight: 500;
-  line-height: 1.2;
-  text-wrap: balance;
-}
-
-.jam-hint {
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 22px;
-  line-height: 1.3;
-  text-wrap: balance;
-}
-
-/* Time left before the song comes back. */
-.jam-drain {
-  display: block;
-  height: 100%;
-  background: var(--bab-gold);
-  transform-origin: left;
-  animation: jam-drain linear forwards;
-}
-
-@keyframes jam-drain {
-  from { transform: scaleX(var(--jam-from, 1)); }
-  to { transform: scaleX(0); }
-}
-
-.spot-card {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.spot-image-frame {
-  position: relative;
-  overflow: hidden;
-  flex: 1;
-  min-height: 0;
-  border: 1px solid var(--line);
-  background: var(--bab-surface-1);
-}
-
-/* One layer per slide: a spotted photo, a chumming photo, or a quote's frame (app/Quotes.tsx). The carousel
-   crossfades them. A photo is shown whole at any shape, never cropped: what it leaves free is the frame's ground. */
-.spot-image {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
-  opacity: 0;
-  transition: opacity .6s ease;
-}
-
-.spot-image.is-active {
-  opacity: 1;
-}
-
-.spot-image-frame .spot-empty {
-  position: absolute;
-  inset: 0;
-  border: 0;
-}
-
-/* Every caption shares one grid cell, so the block is as tall as the tallest and never shifts between photos. */
-.spot-caption {
-  flex: none;
-  display: grid;
-  align-items: start;
-  min-height: 0;
-  transition: min-height var(--bab-slow) var(--bab-ease);
-}
-
-/* Quotes come and go from a deck, so only a few of their captions are in the cell at a time: the block is held
-   at the tallest a quote's caption can be (three lines of 34px, 6px, the 29px credit line; Quotes.module.css). */
-.spot-caption.has-quotes {
-  min-height: 137px;
-}
-
-.spot-caption-item {
-  grid-area: 1 / 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  opacity: 0;
-  transition: opacity .3s ease;
-}
-
-.spot-caption-item.is-active {
-  opacity: 1;
-  transition-delay: .3s;
-}
-
-.spot-names,
-.spot-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-
-/* Who was spotted is the column's headline: EB Garamond, a step below the featured market's name. */
-.spot-names {
-  font: 500 48px/58px var(--display);
-}
-
-.spot-text {
-  font-size: 22px;
-  line-height: 1.3;
-}
-
-.spot-text.is-one-line {
-  -webkit-line-clamp: 1;
-}
-
-/* Who was chumming, under a chumming photo (app/Chum.tsx): the spot headline's line, kept to one line so the
-   caption is never taller than a spot's. Names that do not fit at 48px go a step down, and onto two lines in
-   place of the note: 84px against the 58px headline plus the 35px a note takes. */
-.chum-names {
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  font: 500 48px/58px var(--display);
-}
-
-.chum-names.is-small {
-  font-size: 36px;
-  line-height: 42px;
-}
-
-.chum-names.is-two {
-  -webkit-line-clamp: 2;
-  text-wrap: balance;
-}
-
-.spot-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 16px;
-  color: var(--muted);
-  font-size: 22px;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-.spot-by {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.spot-time {
-  flex: none;
-  color: var(--faint);
-  font: 400 20px/1.3 var(--mono);
-  font-variant-numeric: tabular-nums;
-  text-transform: uppercase;
+  ::selection {
+    background-color: var(--color-accent);
+    color: var(--color-paper);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spot-image,
-  .spot-caption,
-  .spot-caption-item,
-  .spot-caption-item.is-active,
-  .now-playing,
-  .now-playing-fill,
-  .events-slot,
-  .events-slot.is-open,
-  .side-slot:has(.now-playing.is-jam) .events-slot {
-    transition: none;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
-
-  .feed-group {
-    animation: none;
-  }
-}
-
-.spot-empty {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 28px;
 }

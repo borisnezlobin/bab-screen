@@ -98,13 +98,33 @@ const isToken = (value: unknown): value is UniverseToken => {
   );
 };
 
+function nearPrice(price: number, reference: number): boolean {
+  return Number.isFinite(price) && price > 0 && Math.abs(price - reference) / reference <= PRICE_TOLERANCE;
+}
+
+function isEligibleCoin(symbol: string, name: string | null, coinName: unknown, reference: number): boolean {
+  return Boolean(name) && !EXCLUDED.has(symbol) && !NOT_A_TOKEN.test(String(coinName)) && Number.isFinite(reference) && reference > 0;
+}
+
+function resolveVenueToken(
+  symbol: string,
+  name: string,
+  rank: number,
+  reference: number,
+  perp: { market: string; lot: number; price: number } | undefined,
+  spot: { market: string; price: number; volumeUsd: number } | undefined,
+): UniverseToken | null {
+  if (perp && nearPrice(perp.price / perp.lot, reference)) return { symbol, name, venue: "hyperliquid", market: perp.market, lot: perp.lot, rank };
+  if (spot && spot.volumeUsd >= GATE_MIN_VOLUME_USD && nearPrice(spot.price, reference)) return { symbol, name, venue: "gate", market: spot.market, lot: 1, rank };
+  return null;
+}
+
 /** Pure: matches CoinGecko's ranking against what the two venues list. Exported for the checks. */
 export function matchUniverse(
   coins: CoinGeckoCoin[],
   hyperliquid: Map<string, { market: string; lot: number; price: number }>,
   gate: Map<string, { market: string; price: number; volumeUsd: number }>,
 ): UniverseToken[] {
-  const near = (price: number, reference: number) => Number.isFinite(price) && price > 0 && Math.abs(price - reference) / reference <= PRICE_TOLERANCE;
   const tokens: UniverseToken[] = [];
   const taken = new Set<string>();
   const ranked = coins
@@ -113,22 +133,42 @@ export function matchUniverse(
   for (const coin of ranked) {
     const symbol = typeof coin.symbol === "string" ? coin.symbol.trim().toUpperCase() : "";
     if (!/^[A-Z0-9]{1,10}$/.test(symbol) || taken.has(symbol)) continue;
-    // The largest coin owns the ticker whether or not it qualifies: a smaller namesake never gets it.
     taken.add(symbol);
     const name = cleanName(coin.name);
     const reference = Number(coin.current_price);
-    if (!name || EXCLUDED.has(symbol) || NOT_A_TOKEN.test(String(coin.name)) || !Number.isFinite(reference) || reference <= 0) continue;
-    const rank = coin.market_cap_rank as number;
-    const perp = hyperliquid.get(symbol);
-    const spot = gate.get(symbol);
-    if (perp && near(perp.price / perp.lot, reference)) tokens.push({ symbol, name, venue: "hyperliquid", market: perp.market, lot: perp.lot, rank });
-    else if (spot && spot.volumeUsd >= GATE_MIN_VOLUME_USD && near(spot.price, reference)) tokens.push({ symbol, name, venue: "gate", market: spot.market, lot: 1, rank });
+    if (!isEligibleCoin(symbol, name, coin.name, reference)) continue;
+    const token = resolveVenueToken(symbol, name!, coin.market_cap_rank as number, reference, hyperliquid.get(symbol), gate.get(symbol));
+    if (token) tokens.push(token);
     if (tokens.length === MAX_TOKENS) break;
   }
   return tokens;
 }
 
-async function build(): Promise<UniverseToken[]> {
+type HlPerps = [{ universe?: { name?: string; isDelisted?: boolean }[] }, { markPx?: string | null }[]];
+
+function addHyperliquidEntry(hyperliquid: Map<string, { market: string; lot: number; price: number }>, entry: { name?: string; isDelisted?: boolean }, markPx: string | null | undefined): void {
+  const market = entry?.name;
+  if (!market || entry.isDelisted || !/^[A-Za-z0-9]{1,12}$/.test(market)) return;
+  const thousand = /^k[A-Z0-9]+$/.test(market);
+  hyperliquid.set(thousand ? market.slice(1) : market.toUpperCase(), { market, lot: thousand ? 1000 : 1, price: Number(markPx) });
+}
+
+function buildHyperliquidMap(perps: HlPerps): Map<string, { market: string; lot: number; price: number }> {
+  const hyperliquid = new Map<string, { market: string; lot: number; price: number }>();
+  perps[0].universe?.forEach((entry, i) => addHyperliquidEntry(hyperliquid, entry, perps[1]?.[i]?.markPx));
+  return hyperliquid;
+}
+
+function buildGateMap(tickers: { currency_pair?: string; last?: string; quote_volume?: string }[]): Map<string, { market: string; price: number; volumeUsd: number }> {
+  const gate = new Map<string, { market: string; price: number; volumeUsd: number }>();
+  for (const ticker of tickers) {
+    const pair = /^([A-Z0-9]{1,12})_USDT$/.exec(ticker?.currency_pair ?? "");
+    if (pair) gate.set(pair[1], { market: pair[0], price: Number(ticker.last), volumeUsd: Number(ticker.quote_volume) });
+  }
+  return gate;
+}
+
+async function fetchCoinGeckoCoins(): Promise<CoinGeckoCoin[]> {
   const coins: CoinGeckoCoin[] = [];
   for (let page = 1; page <= COINGECKO_PAGES; page += 1) {
     if (page > 1) await pause(COINGECKO_PAUSE_MS);
@@ -136,34 +176,19 @@ async function build(): Promise<UniverseToken[]> {
     if (!Array.isArray(batch)) throw new Error("CoinGecko sent an unexpected reply");
     coins.push(...batch);
   }
+  return coins;
+}
+
+async function build(): Promise<UniverseToken[]> {
+  const coins = await fetchCoinGeckoCoins();
 
   const [perps, tickers] = await Promise.all([
-    getJson<[{ universe?: { name?: string; isDelisted?: boolean }[] }, { markPx?: string | null }[]]>(HL_INFO_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    }),
+    getJson<HlPerps>(HL_INFO_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "metaAndAssetCtxs" }) }),
     getJson<{ currency_pair?: string; last?: string; quote_volume?: string }[]>(GATE_TICKERS_URL),
   ]);
   if (!Array.isArray(perps) || !Array.isArray(perps[0]?.universe) || !Array.isArray(tickers)) throw new Error("a venue sent an unexpected reply");
 
-  const hyperliquid = new Map<string, { market: string; lot: number; price: number }>();
-  perps[0].universe.forEach((entry, i) => {
-    const market = entry?.name;
-    if (!market || entry.isDelisted || !/^[A-Za-z0-9]{1,12}$/.test(market)) return;
-    // "kPEPE" is PEPE quoted per 1,000 tokens.
-    const thousand = /^k[A-Z0-9]+$/.test(market);
-    hyperliquid.set(thousand ? market.slice(1) : market.toUpperCase(), { market, lot: thousand ? 1000 : 1, price: Number(perps[1]?.[i]?.markPx) });
-  });
-
-  const gate = new Map<string, { market: string; price: number; volumeUsd: number }>();
-  for (const ticker of tickers) {
-    const pair = /^([A-Z0-9]{1,12})_USDT$/.exec(ticker?.currency_pair ?? "");
-    if (pair) gate.set(pair[1], { market: pair[0], price: Number(ticker.last), volumeUsd: Number(ticker.quote_volume) });
-  }
-
-  const tokens = matchUniverse(coins, hyperliquid, gate);
-  // Far fewer than usual means a source sent a partial answer; keep the old list instead.
+  const tokens = matchUniverse(coins, buildHyperliquidMap(perps), buildGateMap(tickers));
   if (tokens.length < 50) throw new Error(`only ${tokens.length} tokens matched`);
   return tokens;
 }

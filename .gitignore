@@ -30,3 +30,6 @@ id_ed25519*
 
 # local runtime state (Spotify tokens, song request cursor)
 .data
+
+# local Clef environment (scripts/clef)
+.clef-venv

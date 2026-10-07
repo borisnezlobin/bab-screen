@@ -16,23 +16,28 @@ const NAMED_ENTITIES: Record<string, string> = {
   ensp: " ", emsp: " ", thinsp: " ", rarr: "→", larr: "←",
 };
 
+function decodeNumericRef(body: string): string {
+  const code = body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+  if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return "";
+  return String.fromCodePoint(code);
+}
+
+function decodeEntityRef(whole: string, body: string): string {
+  if (body[0] === "#") return decodeNumericRef(body);
+  const named = NAMED_ENTITIES[body] ?? NAMED_ENTITIES[body.toLowerCase()];
+  return named === undefined ? whole : named;
+}
+
 /** Decodes numeric and common named character references once. Unknown ones are left as written. */
 export function decodeEntities(text: string): string {
   if (!text.includes("&")) return text;
-  return text.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z][a-z0-9]{1,10});/gi, (whole, body: string) => {
-    if (body[0] === "#") {
-      const code = body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
-      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return "";
-      return String.fromCodePoint(code);
-    }
-    const named = NAMED_ENTITIES[body] ?? NAMED_ENTITIES[body.toLowerCase()];
-    return named === undefined ? whole : named;
-  });
+  return text.replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z][a-z0-9]{1,10});/gi, decodeEntityRef);
 }
 
 // C0/C1 controls, zero-width characters, bidi overrides and isolates, BOM, and the Unicode
 // tag block (invisible text, used to hide instructions).
-const INVISIBLE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]|\udb40[\udc00-\udc7f]/g;
+// eslint-disable-next-line no-control-regex
+const INVISIBLE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]|\udb40[\udc00-\udc7f]/g;
 
 /** One line of plain text: invisible characters removed, whitespace collapsed. */
 export function tidy(text: string): string {
@@ -143,13 +148,18 @@ export function clip(text: string, max: number): string {
 
 const SUMMARY_MAX = 260;
 
+const SUMMARY_WP_BOILERPLATE = /\s*(?:The|This) post\b.{0,400}?\b(?:appeared first|first appeared) on\b.*$/i;
+const SUMMARY_READ_FULL = /\s*Read the full (?:story|article)\b.*$/i;
+const SUMMARY_CONTINUE = /\s*(?:Continue reading|Read more)\b.{0,80}$/i;
+const SUMMARY_TRAIL_ELLIPSIS = /\s*\[?(?:…|\.\.\.)\]?\s*$/;
+
 function cleanSummary(text: string | null, title: string, source: string): string | null {
   if (!text) return null;
   let summary = text
-    .replace(/\s*(?:The|This) post\b.{0,400}?\b(?:appeared first|first appeared) on\b.*$/i, "")
-    .replace(/\s*Read the full (?:story|article)\b.*$/i, "")
-    .replace(/\s*(?:Continue reading|Read more)\b.{0,80}$/i, "")
-    .replace(/\s*\[?(?:…|\.\.\.)\]?\s*$/, "…");
+    .replace(SUMMARY_WP_BOILERPLATE, "")
+    .replace(SUMMARY_READ_FULL, "")
+    .replace(SUMMARY_CONTINUE, "")
+    .replace(SUMMARY_TRAIL_ELLIPSIS, "…");
   // WordPress boilerplate: "<Source> <Title> <actual summary>".
   for (const lead of [source, title]) {
     if (summary.toLowerCase().startsWith(lead.toLowerCase())) summary = summary.slice(lead.length);
@@ -183,8 +193,9 @@ function parseDate(text: string | null): number | null {
   return Number.isFinite(time) ? time : null;
 }
 
-function entryLink(block: string): string | null {
-  // Atom: <link rel="alternate" href="..."/>; a link with no rel is an alternate too.
+const HTTP_PROTOCOL_RE = /^https?:\/\//i;
+
+function atomLinkHref(block: string): string | null {
   let fallback: string | null = null;
   for (const tag of openTags(block, "link")) {
     const href = attribute(tag, "href");
@@ -193,7 +204,10 @@ function entryLink(block: string): string | null {
     if (rel === "alternate") return href;
     if (!fallback && rel !== "self" && rel !== "enclosure" && rel !== "replies") fallback = href;
   }
-  if (fallback) return fallback;
+  return fallback;
+}
+
+function rssLinkFallback(block: string): string | null {
   const raw = tagRaw(block, "link");
   if (raw !== null) {
     const link = tidy(xmlText(raw));
@@ -202,17 +216,25 @@ function entryLink(block: string): string | null {
   const guid = tagRaw(block, "guid");
   if (guid !== null) {
     const link = tidy(xmlText(guid));
-    if (/^https?:\/\//i.test(link)) return link;
+    if (HTTP_PROTOCOL_RE.test(link)) return link;
   }
   return null;
 }
 
+function entryLink(block: string): string | null {
+  return atomLinkHref(block) ?? rssLinkFallback(block);
+}
+
+function isImageMediaTag(tag: string): boolean {
+  const type = (attribute(tag, "type") ?? "").toLowerCase();
+  const medium = (attribute(tag, "medium") ?? "").toLowerCase();
+  const isThumbnail = /^<media:thumbnail/i.test(tag);
+  return isThumbnail || type.startsWith("image/") || medium === "image";
+}
+
 function entryImage(block: string): string | null {
   for (const tag of [...openTags(block, "media:content"), ...openTags(block, "media:thumbnail"), ...openTags(block, "enclosure")]) {
-    const type = (attribute(tag, "type") ?? "").toLowerCase();
-    const medium = (attribute(tag, "medium") ?? "").toLowerCase();
-    const isThumbnail = /^<media:thumbnail/i.test(tag);
-    if (!isThumbnail && !type.startsWith("image/") && medium !== "image") continue;
+    if (!isImageMediaTag(tag)) continue;
     const image = httpsImage(attribute(tag, "url"));
     if (image) return image;
   }
@@ -245,6 +267,39 @@ const TITLE_MAX = 220;
 /** Clock skew allowed on publication dates; anything further ahead is dropped as nonsense. */
 const FUTURE_SLACK_MS = 6 * 60 * 60 * 1000;
 
+const ENTRY_BLOCKS_RE = /<(item|entry)(?:\s[^>]*)?>([\s\S]*?)<\/\1\s*>/gi;
+
+function resolveAuthor(block: string): string | null {
+  const direct = tagText(block, "dc:creator");
+  if (direct) return direct;
+  const atomAuthor = tagRaw(block, "author");
+  if (atomAuthor === null) return null;
+  return tagText(atomAuthor, "name") ?? htmlToText(xmlText(atomAuthor));
+}
+
+function parseEntry(block: string, source: string, now: number): ParsedEntry | null {
+  const published = parseDate(tagText(block, "pubDate", "published", "dc:date", "updated"));
+  if (published === null || published > now + FUTURE_SLACK_MS) return null;
+  const title = tagText(block, "title");
+  const url = canonicalUrl(entryLink(block));
+  if (!title || !url) return null;
+  const guid = tagRaw(block, "guid") ?? tagRaw(block, "id");
+  const key = (guid !== null && tidy(xmlText(guid))) || url;
+  return {
+    id: makeId(source, key),
+    kind: "news",
+    source,
+    author: cleanAuthor(resolveAuthor(block), source),
+    handle: null,
+    title: clip(title, TITLE_MAX),
+    summary: cleanSummary(tagText(block, "description", "summary", "media:description"), title, source),
+    url,
+    publishedAt: new Date(Math.min(published, now)).toISOString(),
+    imageUrl: entryImage(block),
+    categories: categories(block),
+  };
+}
+
 /**
  * Entries of an RSS 2.0 or Atom document, as news items. Entries without a title, a usable link
  * or a parseable date are skipped. Never throws; `recognised` is false when the document is not
@@ -253,36 +308,13 @@ const FUTURE_SLACK_MS = 6 * 60 * 60 * 1000;
 export function parseFeed(xml: string, source: string, now = Date.now()): { recognised: boolean; entries: ParsedEntry[] } {
   const recognised = /<(rss|feed|rdf:RDF)\b/i.test(xml.slice(0, 4000));
   const entries: ParsedEntry[] = [];
-  const blocks = /<(item|entry)(?:\s[^>]*)?>([\s\S]*?)<\/\1\s*>/gi;
+  ENTRY_BLOCKS_RE.lastIndex = 0;
   let seen = 0;
-  for (let match = blocks.exec(xml); match && seen < MAX_ENTRIES; match = blocks.exec(xml)) {
+  for (let match = ENTRY_BLOCKS_RE.exec(xml); match && seen < MAX_ENTRIES; match = ENTRY_BLOCKS_RE.exec(xml)) {
     seen += 1;
     try {
-      const block = match[2];
-      const published = parseDate(tagText(block, "pubDate", "published", "dc:date", "updated"));
-      if (published === null || published > now + FUTURE_SLACK_MS) continue;
-      const title = tagText(block, "title");
-      const url = canonicalUrl(entryLink(block));
-      if (!title || !url) continue;
-      const guid = tagRaw(block, "guid") ?? tagRaw(block, "id");
-      const key = (guid !== null && tidy(xmlText(guid))) || url;
-      const atomAuthor = tagRaw(block, "author");
-      const author =
-        tagText(block, "dc:creator") ??
-        (atomAuthor !== null ? (tagText(atomAuthor, "name") ?? htmlToText(xmlText(atomAuthor))) : null);
-      entries.push({
-        id: makeId(source, key),
-        kind: "news",
-        source,
-        author: cleanAuthor(author, source),
-        handle: null,
-        title: clip(title, TITLE_MAX),
-        summary: cleanSummary(tagText(block, "description", "summary", "media:description"), title, source),
-        url,
-        publishedAt: new Date(Math.min(published, now)).toISOString(),
-        imageUrl: entryImage(block),
-        categories: categories(block),
-      });
+      const entry = parseEntry(match[2], source, now);
+      if (entry) entries.push(entry);
     } catch {
       // One odd entry must not cost the rest of the feed.
     }
@@ -302,6 +334,7 @@ const FILLER_TITLE: RegExp[] = [
   /\b(price target|could (hit|reach|top)|will (hit|reach|top)|set to (hit|reach|top)|on track (to|for)|hitting|eyes) \$[\d,.]+/i,
   /\bto \$[\d,.]+\s?(k|m|million|billion|trillion)? by (20\d\d|year[- ]end|eoy)\b/i,
   /\bwhat happened in crypto today\b/i,
+  /^\s*(morning minute|daily (digest|recap|roundup|debrief)|week(ly)? (recap|roundup|in review)|this week in (crypto|defi|web3|ai))\s*[:|-]/i,
   /\b\d+%\s+(upside|downside)\b|\bsees\b.{0,60}\b(upside|hitting|reaching)\b/i,
   /\b(presale|pre-sale|ico) (raises|hits|surpasses|nears|ends|live)\b/i,
   /\b(giveaway|free airdrop|claim your|promo code|bonus code|referral code|sign-?up bonus)\b/i,
@@ -310,6 +343,16 @@ const FILLER_TITLE: RegExp[] = [
   /^\s*(sponsored|pr|ad)\s*[:|-]/i,
   /\b(here'?s why|you won'?t believe|this one (trick|coin))\b/i,
   /\bwhy is (the )?(crypto|bitcoin|btc|eth|ether|xrp|sol|doge|market).{0,30}(up|down|crashing|pumping|dumping) today\b/i,
+];
+// A publisher selling its own events: ticket deals, exhibitor and side-event deadlines, session previews. Checked on
+// 2026-10-02 against TechCrunch's feed (five promos dropped, none of its news) and against headlines where "passes",
+// "deal" or "tickets" are news ("Stablecoin bill passes Senate", "Ticketmaster breach").
+const PROMO_TITLE = [
+  /\b(expo\+?|vip|all[- ]access|early[- ]bird|general admission|attendee|founder|investor|student|conference|event)\s+(pass(es)?|tickets?)\b/i,
+  /\b(\$\d+|save|savings|discount|deal)\b.{0,12}\b(on|for)\s+(your |a |an )?.{0,40}\b(pass(es)?|tickets?)\b/i,
+  /\b(last|final|less than|only) \d+ (hours?|days?)\b.{0,40}\b(apply|exhibit|register|book|save|buy|get|grab)\b/i,
+  /\b(exhibit|sponsor|host a side event|apply to (speak|exhibit|host))\b.{0,40}\b(disrupt|summit|conference|expo|sessions)\b/i,
+  /^\s*techcrunch (disrupt|sessions)\b[^:]{0,12}:/i,
 ];
 const FILLER_CATEGORY = /^(sponsored|press releases?|partner content|paid|advertis(ement|ing)|promoted|price (analysis|predictions?)|branded content|deals?)$/i;
 const FILLER_PATH = /\/(press-releases?|sponsored|partner-content|advertorial|price-prediction|price-analysis|promoted|deals?)(\/|$)/i;
@@ -328,6 +371,7 @@ export function rejectReason(item: { title: string; summary?: string | null; url
   if (UNSUITABLE.test(text)) return "unsuitable_language";
   if (item.kind === "news") {
     if (FILLER_TITLE.some((pattern) => pattern.test(item.title))) return "filler";
+    if (PROMO_TITLE.some((pattern) => pattern.test(item.title))) return "promotion";
     if (itemCategories.some((category) => FILLER_CATEGORY.test(category.trim()))) return "sponsored";
     try {
       if (FILLER_PATH.test(new URL(item.url).pathname)) return "sponsored";
@@ -346,15 +390,24 @@ const STOPWORDS = new Set(
   "a an and are as at be but by for from has have how in into is it its new of on or over says say said that the their this to up us was were what when why will with after amid about than more could may might vs via just now report reports not no all yet still here get gets".split(" "),
 );
 
+const SUFFIX_RULES: Array<{ suffix: string; minLen: number; trim: number }> = [
+  { suffix: "ing", minLen: 5, trim: 3 },
+  { suffix: "ed",  minLen: 4, trim: 2 },
+  { suffix: "es",  minLen: 4, trim: 2 },
+];
+
+function trimInflection(word: string): string {
+  for (const { suffix, minLen, trim } of SUFFIX_RULES) {
+    if (word.length > minLen && word.endsWith(suffix)) return word.slice(0, -trim);
+  }
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
 /** Crude stemmer, enough to match "seized"/"seize", "exits"/"exit", "launches"/"launched". */
 function stem(word: string): string {
-  let out = word;
-  if (out.length > 5 && out.endsWith("ing")) out = out.slice(0, -3);
-  else if (out.length > 4 && out.endsWith("ed")) out = out.slice(0, -2);
-  else if (out.length > 4 && out.endsWith("es")) out = out.slice(0, -2);
-  else if (out.length > 3 && out.endsWith("s") && !out.endsWith("ss")) out = out.slice(0, -1);
-  if (out.length > 4 && out.endsWith("e")) out = out.slice(0, -1);
-  return out;
+  const out = trimInflection(word);
+  return out.length > 4 && out.endsWith("e") ? out.slice(0, -1) : out;
 }
 
 function titleTokens(title: string): Set<string> {
